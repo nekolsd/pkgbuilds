@@ -1,0 +1,27 @@
+# Package directories use a whitelist: ignore everything, then allow recipes and
+# local helper files back in.
+#
+# Not a blacklist, because downloaded file names are unpredictable — claude-code's
+# binary is called claude-2.1.226-x86_64 with no extension at all, and no
+# suffix-based rule catches it. That is how 565MB of binaries once ended up
+# committed by `git add -A`. A whitelist has no such failure mode.
+#
+# If a package needs a new kind of local file tracked, add another ! line below.
+
+/*/*
+# The whitelist assumes "one top-level directory = one package", so non-package
+# directories have to be allowed wholesale, or /*/* swallows things like
+# .github/workflows (which it did, once).
+!/.github/**
+!/*/PKGBUILD
+!/*/*.install
+!/*/*.patch
+!/*/*.hook
+!/*/*.desktop
+!/*/*.sh
+!/*/*.c
+!/*/*.html
+
+# Top-level tooling is tracked as usual; only transient output is excluded.
+nvchecker-new.json
+*.log

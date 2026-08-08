@@ -1,0 +1,74 @@
+[__config__]
+oldver = "nvchecker-old.json"
+newver = "nvchecker-new.json"
+
+# ── GitHub releases ──────────────────────────────────────────────────
+[64gram-desktop-bin]
+source = "github"
+github = "TDesktop-x64/tdesktop"
+use_latest_release = true
+prefix = "v"
+
+[helium-browser-bin]
+source = "github"
+github = "imputnet/helium-linux"
+use_latest_release = true
+
+[pac-pacman-aliases]
+source = "github"
+github = "bbedward/pac-pacman-aliases"
+use_latest_release = true
+prefix = "v"
+
+[protonplus]
+source = "github"
+github = "Vysp3r/ProtonPlus"
+use_latest_release = true
+prefix = "v"
+
+[speedtest-go]
+source = "github"
+github = "showwin/speedtest-go"
+use_latest_release = true
+prefix = "v"
+
+[vicinae-bin]
+source = "github"
+github = "vicinaehq/vicinae"
+use_latest_release = true
+prefix = "v"
+
+[visual-studio-code-bin]
+source = "github"
+github = "microsoft/vscode"
+use_latest_release = true
+
+# ── Vendor version endpoints ─────────────────────────────────────────
+# Google's own version history API; versions[0] is the latest linux/stable.
+[google-chrome]
+source = "cmd"
+cmd = '''curl -sf "https://versionhistory.googleapis.com/v1/chrome/platforms/linux/channels/stable/versions" | python3 -c "import sys,json;print(json.load(sys.stdin)['versions'][0]['version'])"'''
+
+# This endpoint returns a bare version string. Following `latest`, which matches
+# @anthropic-ai/claude-code on npm. There is also a `.../stable` channel, which
+# moves noticeably slower (it sat on 2.1.220 from 2026-07-26 while latest had
+# already reached 2.1.226) — swap latest for stable below if that is preferred.
+[claude-code]
+source = "regex"
+url = "https://downloads.claude.ai/claude-code-releases/latest"
+regex = '([\d.]+)'
+
+# 1Password publishes no version API, but its apt repository metadata carries one.
+# Several fields sit between `Package:` and `Version:`, hence the lazy multi-line
+# match; requiring a newline right after "1password" keeps it from matching the
+# 1password-cli stanza.
+["1password"]
+source = "regex"
+url = "https://downloads.1password.com/linux/debian/amd64/dists/stable/main/binary-amd64/Packages"
+regex = 'Package: 1password\n(?:[^\n]*\n)*?Version: ([\d.]+)'
+
+# ── Cannot be automated ──────────────────────────────────────────────
+# wemeet-bin: its download URL looks like updatecdn.meeting.qq.com/cos/<md5>/...
+# and that md5 cannot be derived from the version — only Tencent's download page
+# has it, and the page is rendered client-side. The upstream AUR maintainer updates
+# the version and the md5 by hand too.

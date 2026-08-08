@@ -1,0 +1,46 @@
+{
+  "version": 2,
+  "data": {
+    "1password": {
+      "version": "8.12.30"
+    },
+    "64gram-desktop-bin": {
+      "version": "1.2.7",
+      "gitref": "refs/tags/v1.2.7",
+      "url": "https://github.com/TDesktop-x64/tdesktop/releases/tag/v1.2.7"
+    },
+    "claude-code": {
+      "version": "2.1.226"
+    },
+    "google-chrome": {
+      "version": "151.0.7922.108"
+    },
+    "helium-browser-bin": {
+      "version": "0.15.3.1",
+      "gitref": "refs/tags/0.15.3.1",
+      "url": "https://github.com/imputnet/helium-linux/releases/tag/0.15.3.1"
+    },
+    "pac-pacman-aliases": {
+      "version": "1.9.9"
+    },
+    "protonplus": {
+      "version": "0.5.22"
+    },
+    "speedtest-go": {
+      "version": "1.7.11",
+      "gitref": "refs/tags/v1.7.11",
+      "url": "https://github.com/showwin/speedtest-go/releases/tag/v1.7.11"
+    },
+    "vicinae-bin": {
+      "version": "0.24.0"
+    },
+    "visual-studio-code-bin": {
+      "version": "1.132.0",
+      "gitref": "refs/tags/1.132.0",
+      "url": "https://github.com/microsoft/vscode/releases/tag/1.132.0"
+    },
+    "wemeet-bin": {
+      "version": "3.26.10.401"
+    }
+  }
+}

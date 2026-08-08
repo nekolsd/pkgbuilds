@@ -1,0 +1,157 @@
+name: Review every AUR source change
+
+# Vendor endpoints and nvchecker remain the only automatic version path. This
+# workflow is an optional, read-only watch on AUR: an outage here cannot stop a
+# build, and no AUR object is ever checked out or executed.
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: aur-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: archlinux:base
+
+    steps:
+      - name: Install the read-only tooling
+        run: pacman -Syu --noconfirm --needed git github-cli
+
+      - name: Check out the local recipes
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # AUR objects are parsed later in this job. Do not leave a repository
+          # write credential available while the untrusted objects are inspected.
+          persist-credentials: false
+
+      - name: Find changed AUR commits
+        id: scan
+        shell: bash
+        run: |
+          if ! ./aur-watch.sh check \
+              > /tmp/aur-changes.tsv \
+              2> /tmp/aur-errors.log; then
+            cat /tmp/aur-errors.log >&2
+            exit 1
+          fi
+          [ ! -s /tmp/aur-errors.log ] || cat /tmp/aur-errors.log >&2
+
+          if [ -s /tmp/aur-changes.tsv ]; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            {
+              echo '### AUR changes awaiting review'
+              cut -f1 /tmp/aur-changes.tsv | sed 's/^/- /'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo 'No AUR commits changed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -s /tmp/aur-errors.log ]; then
+            {
+              echo
+              echo '### AUR checks that were unavailable'
+              echo 'These warnings do not affect vendor-driven builds.'
+              sed 's/^/- /' /tmp/aur-errors.log
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Render reports without write credentials
+        if: steps.scan.outputs.changed == 'true'
+        id: reports
+        shell: bash
+        run: |
+          : > /tmp/aur-reviewable.tsv
+          while IFS=$'\t' read -r pkg old_commit new_commit; do
+            body="/tmp/aur-$pkg.md"
+            if ./aur-watch.sh report \
+                "$pkg" "$old_commit" "$new_commit" > "$body"; then
+              printf '%s\t%s\t%s\n' \
+                "$pkg" "$old_commit" "$new_commit" >> /tmp/aur-reviewable.tsv
+            else
+              rm -f "$body"
+              echo "::warning title=AUR changed during review::$pkg will be retried next run"
+            fi
+          done < /tmp/aur-changes.tsv
+
+          if [ -s /tmp/aur-reviewable.tsv ]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update one review PR per package
+        if: steps.reports.outputs.ready == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Checkout deliberately did not persist credentials. Enable Git's gh
+          # credential helper only now, after all AUR parsing has finished.
+          gh auth setup-git --hostname github.com --force
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          while IFS=$'\t' read -r pkg old_commit new_commit; do
+            branch="aur-watch/$pkg"
+            body="/tmp/aur-$pkg.md"
+
+            pr_number=$(gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --head "$branch" --state open \
+              --json number --jq '.[0].number // empty')
+
+            if [ -n "$pr_number" ]; then
+              git fetch origin \
+                "refs/heads/$branch:refs/remotes/origin/$branch"
+              git checkout -B "$branch" "origin/$branch"
+              new_pr=false
+            else
+              # Fetch a stale closed-PR branch, if one exists, only to establish a
+              # force-with-lease value. The new review always starts from main.
+              git fetch origin \
+                "refs/heads/$branch:refs/remotes/origin/$branch" \
+                2>/dev/null || true
+              git checkout -B "$branch" origin/main
+              new_pr=true
+            fi
+
+            ./aur-watch.sh set-seen "$pkg" "$new_commit"
+            if git diff --quiet -- aur-seen.lock; then
+              # main still has the old baseline until this PR is merged, so the
+              # scanner will rediscover it every day. Preserve the reviewer's PR
+              # body and ready/draft choice when the candidate itself is unchanged.
+              echo "::notice::$pkg review PR already tracks ${new_commit:0:12}"
+              continue
+            fi
+            git add aur-seen.lock
+            git commit -m "$pkg: review AUR commit ${new_commit:0:12}"
+
+            if [ "$new_pr" = true ]; then
+              git push --force-with-lease origin "HEAD:refs/heads/$branch"
+              gh pr create \
+                --repo "$GITHUB_REPOSITORY" \
+                --base main --head "$branch" --draft \
+                --title "$pkg: review AUR commit ${new_commit:0:12}" \
+                --body-file "$body"
+            else
+              git push origin "HEAD:refs/heads/$branch"
+              gh pr edit "$pr_number" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "$pkg: review AUR commit ${new_commit:0:12}" \
+                --body-file "$body"
+              # A newer AUR commit invalidates any earlier readiness decision.
+              gh pr ready "$pr_number" --repo "$GITHUB_REPOSITORY" --undo || true
+            fi
+          done < /tmp/aur-reviewable.tsv
