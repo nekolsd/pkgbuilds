@@ -127,14 +127,20 @@ jobs:
           runuser -u builduser -- rclone sync --copy-links /repo "r2:${R2_BUCKET}/${R2_PREFIX}/x86_64" \
             --transfers 8 --fast-list
 
-      - name: 提交版本变更
+      - name: 推送版本变更
         run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            git config user.name  'github-actions[bot]'
-            git config user.email 'github-actions[bot]@users.noreply.github.com'
-            git add -A
-            git commit -m "CI: 构建更新 [skip ci]"
-            git push
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          # build.sh 在升级版本后自己就 commit 了，所以这里工作区通常是干净的。
+          # 判断条件必须是「有没有未推送的提交」，不能是「有没有未提交的改动」——
+          # 后者永远不成立，会导致构建成功但版本变更从不推送（踩过一次）。
+          git add -A
+          git diff --cached --quiet || git commit -m "CI: 构建产物变更 [skip ci]"
+
+          if [ -z "$(git log "origin/${GITHUB_REF_NAME}..HEAD" --oneline)" ]; then
+            echo "无待推送的提交"
           else
-            echo "配方无变化，无需提交"
+            git log "origin/${GITHUB_REF_NAME}..HEAD" --oneline
+            git push origin "HEAD:${GITHUB_REF_NAME}"
           fi

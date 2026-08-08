@@ -382,7 +382,13 @@ PY
 
     echo
     info "成功 ${#ok[@]} 个: ${ok[*]:-无}"
-    [ ${#failed[@]} -gt 0 ] && warn "失败 ${#failed[@]} 个: ${failed[*]}"
+    # 必须写成 if，不能用 `[ cond ] && warn`：那是本分支的最后一条语句，
+    # 它的退出码就是整个脚本的退出码——没有失败时 [ 0 -gt 0 ] 返回 1，
+    # 成功/失败信号会完全颠倒（CI 里表现为构建全成功却报 exit code 1）。
+    if [ ${#failed[@]} -gt 0 ]; then
+      warn "失败 ${#failed[@]} 个: ${failed[*]}"
+      exit 1
+    fi
     ;;
 
   *) build_one "$1" "${2:-}" ;;
