@@ -1,0 +1,140 @@
+name: 构建并发布到 R2
+
+on:
+  schedule:
+    # UTC 18:00 = 北京时间 02:00，每天一次
+    - cron: '0 18 * * *'
+  workflow_dispatch:          # 手动触发
+  push:
+    paths:
+      - '*/PKGBUILD'          # 手工改了配方也构建
+      - '.github/workflows/build.yml'
+
+# 版本 bump 要提交回本仓库
+permissions:
+  contents: write
+
+concurrency:
+  # 同一时间只允许一个构建，避免两个 job 同时改 R2 上的数据库
+  group: build-and-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      - name: 安装工具链
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git nvchecker rclone pacman-contrib openssh python
+
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 建立构建用户
+        # makepkg 拒绝以 root 运行，且这样也符合最小权限
+        run: |
+          useradd -m builduser
+          echo 'builduser ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builduser
+          chown -R builduser:builduser "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # build.sh 在升级版本后会 git commit，builduser 必须有身份，
+          # 否则 commit 失败（不会中断构建，但版本变更就丢了）
+          runuser -u builduser -- git config --global user.name  'github-actions[bot]'
+          runuser -u builduser -- git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          runuser -u builduser -- git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: 导入 GPG 签名子钥
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          install -d -o builduser -g builduser -m 700 /home/builduser/.gnupg
+          printf '%s' "$GPG_SIGNING_KEY" | runuser -u builduser -- gpg --batch --import
+          # 让 gpg-agent 能在无 tty 的环境下用 secrets 里的密码短语
+          {
+            echo "allow-loopback-pinentry"
+            echo "default-cache-ttl 7200"
+          } > /home/builduser/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" > /home/builduser/.gnupg/gpg.conf
+          [ -n "$GPG_PASSPHRASE" ] && \
+            echo "passphrase $GPG_PASSPHRASE" >> /home/builduser/.gnupg/gpg.conf || true
+          chown -R builduser:builduser /home/builduser/.gnupg
+
+      - name: 配置 rclone 连接 R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          install -d -o builduser -g builduser -m 700 /home/builduser/.config/rclone
+          cat > /home/builduser/.config/rclone/rclone.conf <<EOF
+          [r2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = ${R2_ACCESS_KEY_ID}
+          secret_access_key = ${R2_SECRET_ACCESS_KEY}
+          endpoint = https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
+          acl = private
+          no_check_bucket = true
+          EOF
+          chown -R builduser:builduser /home/builduser/.config
+
+      - name: 拉取 R2 上已有的仓库
+        # 关键：容器每次全新，不先同步下来的话 repo-add 会基于空目录重建索引，
+        # 导致本次未构建的包全部从数据库中消失。
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PREFIX: archlinux
+        run: |
+          install -d -o builduser -g builduser /repo
+          runuser -u builduser -- rclone sync "r2:${R2_BUCKET}/${R2_PREFIX}/x86_64" /repo \
+            --transfers 8 --checkers 16 --fast-list
+          echo "拉下 $(ls /repo/*.pkg.tar.zst 2>/dev/null | wc -l) 个已有包"
+
+      - name: 构建有更新的包
+        env:
+          BUILD_BACKEND: makepkg
+          REPO_DIR: /repo
+          # 仓库名不是机密，写在这里而非 secrets——改起来也方便
+          REPO_NAME: nekolsd
+          SIGN_KEY: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          runuser -u builduser -- env \
+            BUILD_BACKEND="$BUILD_BACKEND" REPO_DIR="$REPO_DIR" \
+            REPO_NAME="$REPO_NAME" SIGN_KEY="$SIGN_KEY" \
+            ./build.sh --outdated
+
+      - name: 同步回 R2
+        # --copy-links 不可省：repo-add 会把 nekolsd.db 建成指向 nekolsd.db.tar.zst 的软链接，
+        # 对象存储没有软链接概念，rclone 默认直接跳过——而 pacman 请求的正是 nekolsd.db。
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PREFIX: archlinux
+        run: |
+          # 先传包体、后传数据库：中途失败时数据库仍指向旧版本（都还在），
+          # 而不会出现「索引说有、文件还没上传」的窗口。
+          runuser -u builduser -- rclone copy --copy-links /repo "r2:${R2_BUCKET}/${R2_PREFIX}/x86_64" \
+            --exclude '*.db*' --exclude '*.files*' --transfers 8 --fast-list
+          runuser -u builduser -- rclone copy --copy-links /repo "r2:${R2_BUCKET}/${R2_PREFIX}/x86_64" \
+            --include '*.db*' --include '*.files*'
+          # 最后删除远端多余的旧版本包
+          runuser -u builduser -- rclone sync --copy-links /repo "r2:${R2_BUCKET}/${R2_PREFIX}/x86_64" \
+            --transfers 8 --fast-list
+
+      - name: 提交版本变更
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name  'github-actions[bot]'
+            git config user.email 'github-actions[bot]@users.noreply.github.com'
+            git add -A
+            git commit -m "CI: 构建更新 [skip ci]"
+            git push
+          else
+            echo "配方无变化，无需提交"
+          fi

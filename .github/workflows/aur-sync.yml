@@ -1,0 +1,99 @@
+name: 上游配方变更时开 PR
+
+# 本仓库的配方是从 AUR 取的快照，此后不再自动跟随——日常的版本更新由
+# nvchecker 直接问厂商官网，全程不碰 AUR，因此没有投毒面。
+#
+# 但上游维护者偶尔会改配方本身（新增依赖、改 source、加 install 脚本、打补丁）。
+# 这类改动不跟进的后果是具体的：上游若「新增」了一个依赖，包照样能构建、能安装，
+# 但运行时才缺库——构建全程无任何报错，最难排查。
+#
+# 所以这个 workflow 只做一件事：发现这类改动时开一个 PR，让人来审。
+# 绝不自动合并——PKGBUILD 是会在构建机上执行的代码，合并必须是人的决定。
+
+on:
+  schedule:
+    # 与构建同频：UTC 18:00 = 北京时间 02:00
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: aur-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      - name: 安装工具链
+        run: pacman -Syu --noconfirm --needed git github-cli pacman-contrib
+
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 建立构建用户
+        # updpkgsums 会调 makepkg，而 makepkg 拒绝以 root 运行
+        run: |
+          useradd -m builduser
+          chown -R builduser:builduser "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          runuser -u builduser -- git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: 找出上游有改动的包
+        id: check
+        run: |
+          pkgs=$(runuser -u builduser -- ./build.sh --aur-check | tr '\n' ' ')
+          echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
+          if [ -z "$pkgs" ]; then
+            echo "上游配方无变化" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "上游有改动的包：$pkgs" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 逐个开 PR
+        if: steps.check.outputs.pkgs != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          for p in ${{ steps.check.outputs.pkgs }}; do
+            branch="aur-sync/$p"
+
+            # 已经有开着的 PR 就跳过，避免每天重复开同一个
+            if [ -n "$(gh pr list --head "$branch" --state open --json number -q '.[].number')" ]; then
+              echo "::notice::$p 已有开启中的 PR，跳过"
+              continue
+            fi
+
+            git checkout -B "$branch" origin/main
+            # aur_apply 改工作区、把 PR 正文打到 stdout
+            runuser -u builduser -- ./build.sh --aur-apply "$p" > /tmp/body.md
+
+            if git diff --quiet -- "$p/PKGBUILD"; then
+              echo "::notice::$p 合并后无实际差异，跳过"
+              continue
+            fi
+
+            git add "$p/PKGBUILD"
+            git commit -m "$p: 合并上游 AUR 的配方改动"
+            git push -f origin "$branch"
+            gh pr create \
+              --base main --head "$branch" \
+              --title "$p: 上游 AUR 配方有改动，请审阅" \
+              --body-file /tmp/body.md \
+              --label "aur-sync" || true
+          done
+
+      - name: 恢复工作区
+        if: always()
+        run: git checkout -f main 2>/dev/null || true

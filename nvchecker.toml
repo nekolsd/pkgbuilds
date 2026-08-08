@@ -1,0 +1,72 @@
+[__config__]
+oldver = "nvchecker-old.json"
+newver = "nvchecker-new.json"
+
+# ── GitHub release 类 ────────────────────────────────────────────────
+[64gram-desktop-bin]
+source = "github"
+github = "TDesktop-x64/tdesktop"
+use_latest_release = true
+prefix = "v"
+
+[helium-browser-bin]
+source = "github"
+github = "imputnet/helium-linux"
+use_latest_release = true
+
+[pac-pacman-aliases]
+source = "github"
+github = "bbedward/pac-pacman-aliases"
+use_latest_release = true
+prefix = "v"
+
+[protonplus]
+source = "github"
+github = "Vysp3r/ProtonPlus"
+use_latest_release = true
+prefix = "v"
+
+[speedtest-go]
+source = "github"
+github = "showwin/speedtest-go"
+use_latest_release = true
+prefix = "v"
+
+[vicinae-bin]
+source = "github"
+github = "vicinaehq/vicinae"
+use_latest_release = true
+prefix = "v"
+
+[visual-studio-code-bin]
+source = "github"
+github = "microsoft/vscode"
+use_latest_release = true
+
+# ── 厂商版本端点 ─────────────────────────────────────────────────────
+# Google 官方版本历史 API，versions[0] 即 linux/stable 最新
+[google-chrome]
+source = "cmd"
+cmd = '''curl -sf "https://versionhistory.googleapis.com/v1/chrome/platforms/linux/channels/stable/versions" | python3 -c "import sys,json;print(json.load(sys.stdin)['versions'][0]['version'])"'''
+
+# 该端点直接返回纯文本版本号。这里跟 latest：与 npm 上的
+# @anthropic-ai/claude-code 一致。另有 .../stable 通道，明显更慢
+# （2026-07-26 起就停在 2.1.220，而彼时 latest 已到 2.1.226），
+# 想少折腾可把下面的 latest 换成 stable。
+[claude-code]
+source = "regex"
+url = "https://downloads.claude.ai/claude-code-releases/latest"
+regex = '([\d.]+)'
+
+# 1Password 不提供版本 API，但其 apt 仓库的 Packages 元数据里有。
+# Package: 与 Version: 之间隔着若干字段，故用惰性跨行匹配；
+# "1password" 后要求紧跟换行，因此不会误匹配 1password-cli 那一节。
+["1password"]
+source = "regex"
+url = "https://downloads.1password.com/linux/debian/amd64/dists/stable/main/binary-amd64/Packages"
+regex = 'Package: 1password\n(?:[^\n]*\n)*?Version: ([\d.]+)'
+
+# ── 无法自动化 ───────────────────────────────────────────────────────
+# wemeet-bin：下载 URL 形如 updatecdn.meeting.qq.com/cos/<md5>/...
+# 那个 md5 无法从版本号推导，只有腾讯下载页给，且页面是 JS 动态渲染的。
+# 上游 AUR 维护者同样是手动更新版本号 + md5。流程见 README.md。
