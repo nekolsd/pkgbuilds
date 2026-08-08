@@ -71,16 +71,62 @@ ensure_pgp_keys() {
 # （PKGBUILD 会以构建用户身份运行），这正是 2026 年那几轮投毒的传播方式。
 # 是否采纳必须由人看过 diff 之后决定。
 #
+# 列出一个包的「配方文件」——即会被 git 跟踪的那些。
+# 白名单式 .gitignore 保证了这里只有配方与本地辅助文件，
+# 不会混进下载的上游源或构建产物。
+recipe_files() { (cd "$ROOT" && git ls-files "$1" | sed "s|^$1/||"); }
+
+# 上游仓库里参与构建的文件。
+#
+# 要排除两类东西：
+#   - 所有点开头的文件：.SRCINFO 由 PKGBUILD 自动生成且含 pkgver；
+#     .gitignore / .nvchecker.toml / .gitlab-ci.yml 是维护者自己的工具配置
+#   - CODEOWNERS、aur.env 之类的仓库基础设施文件
+# 它们都不被 makepkg 使用，比对只会产生假阳性（实测 11 个包会全部误报）。
+#
+# 刻意不去 source 上游 PKGBUILD 来解析 source 数组——那等于在人工审查之前
+# 就执行了未经审查的代码，正是这套机制要防的事。宁可用粗一点的排除规则：
+# 万一上游新增了某种没见过的基础设施文件，后果只是多开一个 PR（失败方向安全），
+# 看过之后把文件名加进下面的列表即可。
+upstream_files() {
+  (cd "$1" && find . -maxdepth 1 -type f -printf '%P\n' \
+    | grep -vE '^\.' \
+    | grep -vxE 'CODEOWNERS|aur\.env' \
+    | sort)
+}
+
 # 判断某个包的上游配方是否有「非版本号/校验和」的实质变化。
 # 有返回 0，无返回 1。$2 是已 clone 好的上游目录。
+#
+# 必须比对全部配方文件，不能只看 PKGBUILD——.install 脚本是在装包时
+# 以 root 身份执行的，.patch 会打进源码，wemeet-bin 甚至有个要编译的 wrap.c。
+# 只查 PKGBUILD 的话，「PKGBUILD 一字不改、.install 里插一行 curl|bash」
+# 这种最危险的投毒方式会完全检测不到。
 has_drift() {
-  local p=$1 up=$2 out
+  local p=$1 up=$2 out f
   out=$(diff -u "$ROOT/$p/PKGBUILD" "$up/PKGBUILD" 2>/dev/null \
     | grep -vE "^[+-](pkgver|pkgrel|_tarver|_pkgver[a-zA-Z_]*|_x86_md5|_arm_md5)=" \
     | grep -vE "^[+-](sha256sums|sha512sums|sha1sums|md5sums|b2sums)" \
     | grep -vE "^[+-][[:space:]]*'[0-9a-fA-F]{32,128}'\)?$" \
     | grep -vE '^(---|\+\+\+|@@)' | grep -E '^[+-]' || true)
-  [ -n "$out" ]
+  [ -n "$out" ] && return 0
+
+  # 我们已经在跟踪的辅助文件：逐字节比对，任何差异都算（含上游删除）
+  for f in $(recipe_files "$p" | grep -vx PKGBUILD); do
+    cmp -s "$ROOT/$p/$f" "$up/$f" 2>/dev/null || return 0
+  done
+
+  # 上游多出来的文件：只有被 PKGBUILD 以完整词引用时才算——
+  # AUR 仓库里常带 LICENSE、README.md 这类不参与构建的文件，
+  # 一律算漂移会让 11 个包全部误报。
+  # 用词边界而非子串匹配：helium 的 PKGBUILD 里有 LICENSE.ungoogled_chromium，
+  # 子串匹配会把无关的 LICENSE 文件也判成被引用。
+  for f in $(upstream_files "$up" | grep -vx PKGBUILD); do
+    [ -e "$ROOT/$p/$f" ] && continue                    # 已在上一轮比过
+    grep -qE "(^|[^A-Za-z0-9._-])$(sed 's/[][\.*^$/]/\\&/g' <<<"$f")([^A-Za-z0-9._-]|$)" \
+      "$up/PKGBUILD" && return 0
+  done
+  return 1
 }
 
 # 列出上游配方有实质变化的包名，一行一个——供 CI 决定给哪些包开 PR。
@@ -112,7 +158,18 @@ aur_apply() {
   cur=$(cd "$ROOT/$p" && CARCH=x86_64; source ./PKGBUILD >/dev/null 2>&1; echo "$pkgver")
   rel=$(grep -m1 '^pkgrel=' "$ROOT/$p/PKGBUILD" | cut -d= -f2 | tr -d "'\"")
 
-  cp "$tmp/up/PKGBUILD" "$ROOT/$p/PKGBUILD"
+  # 同步上游的全部配方文件，不能只拿 PKGBUILD：
+  # 上游若新增了 patch 或改了 .install，只复制 PKGBUILD 会得到一份
+  # 引用了不存在文件的配方，构建直接失败。
+  local f
+  for f in $(recipe_files "$p"); do            # 上游已删除的，我们这边也删掉
+    [ "$f" = PKGBUILD ] && continue
+    [ -e "$tmp/up/$f" ] || rm -f "$ROOT/$p/$f"
+  done
+  for f in $(upstream_files "$tmp/up"); do     # 上游有的，全部覆盖过来
+    cp "$tmp/up/$f" "$ROOT/$p/$f"
+  done
+
   bump_version "$ROOT/$p" "$cur"                       # 版本号改回我们的（顺带把 pkgrel 置 1）
   sed -i -E "s|^pkgrel=.*|pkgrel=$((rel + 1))|" "$ROOT/$p/PKGBUILD"
 
