@@ -4,7 +4,7 @@ on:
   schedule:
     # 18:00 UTC, once a day
     - cron: '0 18 * * *'
-  workflow_dispatch:          # manual trigger
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -15,172 +15,195 @@ on:
       - '!.github/**'
       - '.github/workflows/build.yml'
 
-# Version bumps get committed back to this repository.
+# Jobs inherit read-only repository access. Only `commit` receives write access,
+# and that job never executes a PKGBUILD or package artifact.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  # One build at a time, so two jobs never rewrite the database on R2 at once.
+  # One publisher at a time, so two runs never rewrite the R2 database together.
   group: build-and-publish
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    outputs:
+      has_builds: ${{ steps.selection.outputs.has_builds }}
+      has_recipe_changes: ${{ steps.selection.outputs.has_recipe_changes }}
+
+    steps:
+      - name: Install preparation tools
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git nvchecker pacman-contrib python
+
+      - name: Check out without stored credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select packages and prepare vendor recipes
+        id: selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          output_dir="$RUNNER_TEMP/prepared"
+          ./ci/prepare.sh "$output_dir"
+
+          if [ -s "$output_dir/packages.txt" ]; then
+            echo 'has_builds=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'has_builds=false' >> "$GITHUB_OUTPUT"
+          fi
+          if [ -s "$output_dir/recipe.patch" ]; then
+            echo 'has_recipe_changes=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'has_recipe_changes=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload prepared metadata
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: prepared-changes
+          path: ${{ runner.temp }}/prepared
+          if-no-files-found: error
+          retention-days: 1
+
   build:
+    needs: prepare
+    if: needs.prepare.outputs.has_builds == 'true'
     runs-on: ubuntu-latest
     container:
       image: archlinux:base-devel
 
     steps:
-      - name: Install toolchain
+      - name: Install build tools
         run: |
           pacman -Syu --noconfirm --needed \
-            git nvchecker rclone pacman-contrib openssh python
+            git gnupg openssh python sudo
 
-      - name: Check out the repository
-        uses: actions/checkout@v6
+      - name: Check out without stored credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Create the build user
-        # makepkg refuses to run as root, and this keeps privileges minimal anyway.
+      - name: Download prepared metadata
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: prepared-changes
+          path: ${{ runner.temp }}/prepared
+
+      - name: Apply prepared recipe changes
+        run: ./ci/apply-prepared-changes.sh "$RUNNER_TEMP/prepared/recipe.patch"
+
+      - name: Create the unprivileged build user
         run: |
           useradd -m builduser
-          echo 'builduser ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builduser
+          echo 'builduser ALL=(root) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builduser
+          install -d -o builduser -g builduser -m0755 /artifacts
+          install -o builduser -g builduser -m0644 \
+            "$RUNNER_TEMP/prepared/packages.txt" /home/builduser/packages.txt
+          install -o builduser -g builduser -m0644 \
+            "$RUNNER_TEMP/prepared/expected-packages.tsv" /home/builduser/expected-packages.tsv
           chown -R builduser:builduser "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          # build.sh commits after a version bump, so builduser needs an identity —
-          # without one the commit fails (the build carries on, but the version
-          # change is lost).
-          runuser -u builduser -- git config --global user.name  'github-actions[bot]'
-          runuser -u builduser -- git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          runuser -u builduser -- git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Import the GPG signing subkey
+      - name: Build unsigned packages without publishing credentials
+        run: |
+          runuser -u builduser -- env HOME=/home/builduser \
+            ./ci/build-packages.sh /home/builduser/packages.txt \
+              /home/builduser/expected-packages.tsv /artifacts
+
+      - name: Upload unsigned packages
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: unsigned-packages
+          path: /artifacts
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.has_builds == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      - name: Install publishing tools
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git gnupg rclone
+
+      - name: Check out without stored credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download unsigned packages
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: unsigned-packages
+          path: /packages
+
+      - name: Download prepared artifact policy
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: prepared-changes
+          path: ${{ runner.temp }}/prepared
+
+      - name: Verify package artifact before exposing secrets
+        run: |
+          ./ci/publish.sh --verify-only /packages \
+            "$RUNNER_TEMP/prepared/expected-packages.tsv"
+
+      - name: Sign and publish to R2
         env:
+          GNUPGHOME: /publisher-gnupg
           GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        run: |
-          install -d -o builduser -g builduser -m 700 /home/builduser/.gnupg
-          printf '%s' "$GPG_SIGNING_KEY" | runuser -u builduser -- gpg --batch --import
-          # Let gpg-agent take the passphrase from secrets with no tty available.
-          {
-            echo "allow-loopback-pinentry"
-            echo "default-cache-ttl 7200"
-          } > /home/builduser/.gnupg/gpg-agent.conf
-          echo "pinentry-mode loopback" > /home/builduser/.gnupg/gpg.conf
-          [ -n "$GPG_PASSPHRASE" ] && \
-            echo "passphrase $GPG_PASSPHRASE" >> /home/builduser/.gnupg/gpg.conf || true
-          chown -R builduser:builduser /home/builduser/.gnupg
-
-      - name: Configure rclone for R2
-        env:
+          SIGN_KEY: ${{ secrets.GPG_KEY_ID }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          install -d -o builduser -g builduser -m 700 /home/builduser/.config/rclone
-          cat > /home/builduser/.config/rclone/rclone.conf <<EOF
-          [r2]
-          type = s3
-          provider = Cloudflare
-          access_key_id = ${R2_ACCESS_KEY_ID}
-          secret_access_key = ${R2_SECRET_ACCESS_KEY}
-          endpoint = https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
-          acl = private
-          no_check_bucket = true
-          EOF
-          chown -R builduser:builduser /home/builduser/.config
-
-      - name: Pull the existing repository from R2
-        # Essential: the container is new every run, and without syncing down first
-        # repo-add rebuilds the index from an empty directory, dropping every package
-        # that was not built this time.
-        env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
           R2_PREFIX: archlinux
-        run: |
-          install -d -o builduser -g builduser /repo
-          runuser -u builduser -- rclone sync "r2:${R2_BUCKET}/${R2_PREFIX}/x86_64" /repo \
-            --transfers 8 --checkers 16 --fast-list
-          echo "pulled $(ls /repo/*.pkg.tar.zst 2>/dev/null | wc -l) existing packages"
-
-      - name: Build vendor updates or reviewed local changes
-        env:
-          BUILD_BACKEND: makepkg
-          REPO_DIR: /repo
-          # The repo name is not a secret; keeping it here makes it easy to change.
           REPO_NAME: nekolsd
-          SIGN_KEY: ${{ secrets.GPG_KEY_ID }}
-          EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
-          build_as_user() {
-            runuser -u builduser -- env \
-              BUILD_BACKEND="$BUILD_BACKEND" REPO_DIR="$REPO_DIR" \
-              REPO_NAME="$REPO_NAME" SIGN_KEY="$SIGN_KEY" \
-              ./build.sh "$@"
-          }
+          ./ci/publish.sh /packages \
+            "$RUNNER_TEMP/prepared/expected-packages.tsv" /repo
 
-          if [ "$EVENT_NAME" = push ]; then
-            mapfile -d '' -t changed_packages < <(
-              declare -A emitted=()
-              while IFS= read -r -d '' path; do
-                [[ $path == */* ]] || continue
-                package=${path%%/*}
-                [ -f "$package/PKGBUILD" ] || continue
-                [ -z "${emitted[$package]+present}" ] || continue
-                emitted["$package"]=1
-                printf '%s\0' "$package"
-              done < <(git diff --name-only -z "$BEFORE_SHA" "$GITHUB_SHA" --)
-            )
+  commit:
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.has_recipe_changes == 'true' && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
-            if [ ${#changed_packages[@]} -gt 0 ]; then
-              printf 'reviewed package changes: %s\n' "${changed_packages[*]}"
-              for package in "${changed_packages[@]}"; do
-                build_as_user "$package"
-              done
-              exit 0
-            fi
-          fi
+    steps:
+      - name: Check out the latest branch head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
 
-          # Schedules, manual runs, and build-workflow-only changes use the
-          # vendor endpoints. AUR is never consulted by this path.
-          build_as_user --outdated
+      - name: Download prepared metadata
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: prepared-changes
+          path: ${{ runner.temp }}/prepared
 
-      - name: Sync back to R2
-        # --copy-links is not optional: repo-add makes nekolsd.db a symlink to
-        # nekolsd.db.tar.zst, object storage has no notion of symlinks, and rclone
-        # skips them by default — while nekolsd.db is exactly what pacman asks for.
-        env:
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          R2_PREFIX: archlinux
+      - name: Validate and apply the prepared recipe patch
+        run: ./ci/apply-prepared-changes.sh "$RUNNER_TEMP/prepared/recipe.patch"
+
+      - name: Commit the published vendor versions
         run: |
-          # Packages first, database last: if this fails halfway the database still
-          # points at the previous versions (which are all still there), rather than
-          # leaving a window where the index promises a file that is not uploaded yet.
-          runuser -u builduser -- rclone copy --copy-links /repo "r2:${R2_BUCKET}/${R2_PREFIX}/x86_64" \
-            --exclude '*.db*' --exclude '*.files*' --transfers 8 --fast-list
-          runuser -u builduser -- rclone copy --copy-links /repo "r2:${R2_BUCKET}/${R2_PREFIX}/x86_64" \
-            --include '*.db*' --include '*.files*'
-          # Finally drop superseded packages from the remote.
-          runuser -u builduser -- rclone sync --copy-links /repo "r2:${R2_BUCKET}/${R2_PREFIX}/x86_64" \
-            --transfers 8 --fast-list
-
-      - name: Push version changes
-        run: |
-          git config user.name  'github-actions[bot]'
+          git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-
-          # build.sh already commits after a version bump, so the working tree is
-          # usually clean here. The condition has to be "are there unpushed commits",
-          # not "are there uncommitted changes" — the latter is never true, which
-          # meant successful builds never pushed their version changes.
-          git add -A
-          git diff --cached --quiet || git commit -m "CI: build artifacts changed [skip ci]"
-
-          if [ -z "$(git log "origin/${GITHUB_REF_NAME}..HEAD" --oneline)" ]; then
-            echo "nothing to push"
-          else
-            git log "origin/${GITHUB_REF_NAME}..HEAD" --oneline
-            git push origin "HEAD:${GITHUB_REF_NAME}"
-          fi
+          git commit -m 'CI: advance published vendor versions [skip ci]'
+          git push origin "HEAD:${GITHUB_REF_NAME}"

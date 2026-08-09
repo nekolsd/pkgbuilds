@@ -3,6 +3,8 @@
 #
 #   ./build.sh <pkg> [version]    build one package; bumps first if a version is given
 #   ./build.sh --outdated         build everything nvchecker reports as behind
+#   ./build.sh --prepare-outdated <file>
+#                                  update recipes/checksums only; write package names
 #   ./build.sh --check            run nvchecker only, list what is behind
 #   ./build.sh --clean-src [pkg]  drop downloaded sources and build leftovers
 set -euo pipefail
@@ -26,6 +28,10 @@ BUILD_BACKEND="${BUILD_BACKEND:-chroot}"
 # and pacman installs them as root.
 SIGN_KEY="${SIGN_KEY:-}"
 REPO_NAME="${REPO_NAME:-nekolsd}"
+# When this is set, build unsigned packages into this directory and stop before
+# signing or touching a repository database. CI uses it in its untrusted build
+# job; the directory is uploaded as an artifact for a separate publisher job.
+PACKAGE_OUTPUT_DIR="${PACKAGE_OUTPUT_DIR:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 info() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -36,9 +42,22 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 # subcommand does not mean coming back here to fix line numbers.
 usage() { awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 1; }
 
+validate_package_name() {
+  [[ $1 =~ ^[[:alnum:]@._+-]+$ ]] || die "invalid package name: $1"
+}
+
+validate_version() {
+  # pkgver may contain letters, numbers, periods, underscores and plus signs,
+  # but not whitespace, slashes, colons or hyphens. Apart from matching Arch's
+  # rules, this keeps an untrusted vendor response out of sed syntax and paths.
+  [[ $1 =~ ^[[:alnum:]][[:alnum:].+_]*$ ]] \
+    || die "invalid vendor version for an Arch pkgver: $1"
+}
+
 # Set the version in a PKGBUILD to $2 and reset pkgrel to 1.
 bump_version() {
   local d=$1 v=$2 var
+  validate_version "$v"
   if grep -q '^pkgver=\$' "$d/PKGBUILD"; then
     # pkgver is derived from an underscore variable (1password uses _tarver);
     # the source variable is what has to change.
@@ -51,6 +70,35 @@ bump_version() {
     sed -i -E "s|^pkgver=.*|pkgver=${v}|" "$d/PKGBUILD"
   fi
   sed -i -E "s|^pkgrel=.*|pkgrel=1|" "$d/PKGBUILD"
+}
+
+# Update one recipe without executing prepare(), build(), check() or package().
+# updpkgsums downloads the declared sources and hashes them; this is safe to run
+# in the credential-free preparation job. Restore the exact previous file if it
+# cannot finish, so a new version is never paired with old checksums.
+prepare_one() {
+  local pkg=$1 newver=$2 d backup
+  validate_package_name "$pkg"
+  validate_version "$newver"
+  d="$ROOT/$pkg"
+  [ -f "$d/PKGBUILD" ] || die "no PKGBUILD for package: $pkg"
+
+  backup=$(mktemp) || die "$pkg: could not create a PKGBUILD backup"
+  cp -p -- "$d/PKGBUILD" "$backup" || { rm -f "$backup"; die "$pkg: could not back up PKGBUILD"; }
+
+  if ! bump_version "$d" "$newver"; then
+    cp -p -- "$backup" "$d/PKGBUILD"
+    rm -f "$backup"
+    die "$pkg: failed to set the version; PKGBUILD restored"
+  fi
+
+  info "$pkg: regenerating checksums (downloads sources, does not build them)..."
+  if ! (cd "$d" && updpkgsums); then
+    cp -p -- "$backup" "$d/PKGBUILD"
+    rm -f "$backup"
+    die "$pkg: source download failed; PKGBUILD restored"
+  fi
+  rm -f "$backup"
 }
 
 # Make sure the upstream signing keys a PKGBUILD declares are in the local keyring,
@@ -128,17 +176,24 @@ build_one() {
   local newver=${2:-}
   local d="$ROOT/$pkg"
 
+  validate_package_name "$pkg"
+  [ -f "$d/PKGBUILD" ] || die "no such package here: $pkg"
+
+  if [ -n "$PACKAGE_OUTPUT_DIR" ] && [ -n "$SIGN_KEY" ]; then
+    die "$pkg: PACKAGE_OUTPUT_DIR and SIGN_KEY are mutually exclusive; artifact builds must be unsigned"
+  fi
+
   # Checked before anything else: an unsigned build into a signed repo silently
   # invalidates the database signature -- repo-add rewrites the database while the
   # .sig stays on the old contents, and nothing notices until some later operation
   # runs with -v. Has to be caught before the build, or a whole download-and-compile
   # cycle is wasted before it fails.
-  if [ -z "$SIGN_KEY" ] && [ -f "$REPO_DIR/$REPO_NAME.db.tar.zst.sig" ]; then
+  if [ -z "$PACKAGE_OUTPUT_DIR" ] && [ -z "$SIGN_KEY" ] \
+     && [ -f "$REPO_DIR/$REPO_NAME.db.tar.zst.sig" ]; then
     die "$pkg: repo $REPO_DIR is signed but SIGN_KEY is unset for this build.
      Continuing would invalidate the database signature. Either set SIGN_KEY=<key id>,
      or delete $REPO_NAME.db.tar.zst.sig to give up signing explicitly."
   fi
-  [ -d "$d" ] || die "no such package here: $pkg"
   cd "$d"
 
   # Note: every step below writes an explicit `|| die` rather than relying on set -e.
@@ -150,14 +205,7 @@ build_one() {
     local cur
     cur=$(CARCH=x86_64; source ./PKGBUILD >/dev/null 2>&1; echo "$pkgver")
     info "$pkg: $cur → $newver"
-    bump_version "$d" "$newver" || die "$pkg: failed to set the version"
-    info "regenerating checksums (re-downloads from the vendor)..."
-    if ! updpkgsums; then
-      # Version bumped but checksums not updated leaves the PKGBUILD in a dangerous
-      # inconsistent state; roll it back.
-      git -C "$ROOT" checkout -- "$pkg/PKGBUILD"
-      die "$pkg: source download failed, checksums were not updated; PKGBUILD rolled back"
-    fi
+    prepare_one "$pkg" "$newver"
   fi
 
   ensure_pgp_keys "$d"
@@ -201,6 +249,20 @@ build_one() {
   shopt -u nullglob
   [ ${#built[@]} -gt 0 ] || die "$pkg: no package was produced"
 
+  if [ -n "$PACKAGE_OUTPUT_DIR" ]; then
+    mkdir -p "$PACKAGE_OUTPUT_DIR"
+    local artifacts=()
+    for f in "${built[@]}"; do
+      [ ! -e "$f.sig" ] || die "$pkg: artifact build unexpectedly produced a signature"
+      [ ! -e "$PACKAGE_OUTPUT_DIR/$(basename "$f")" ] \
+        || die "$pkg: duplicate artifact name: $(basename "$f")"
+      mv -- "$f" "$PACKAGE_OUTPUT_DIR/"
+      artifacts+=("$PACKAGE_OUTPUT_DIR/$(basename "$f")")
+    done
+    info "$pkg: unsigned artifact(s) ready → ${artifacts[*]##*/}"
+    return 0
+  fi
+
   mkdir -p "$REPO_DIR"
   local moved=()
   for f in "${built[@]}"; do
@@ -222,6 +284,77 @@ build_one() {
   fi
 }
 
+advance_baseline() {
+  [ "$#" -gt 0 ] || return 0
+  python3 - "$ROOT/nvchecker-new.json" "$ROOT/nvchecker-old.json" "$@" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+new_path, old_path, *packages = sys.argv[1:]
+with open(new_path, encoding="utf-8") as stream:
+    new = json.load(stream)["data"]
+with open(old_path, encoding="utf-8") as stream:
+    old = json.load(stream)
+
+for package in packages:
+    if package not in new:
+        raise SystemExit(f"nvchecker produced no data for {package}")
+    old["data"][package] = new[package]
+
+fd, temporary = tempfile.mkstemp(prefix=".nvchecker-old.", dir=os.path.dirname(old_path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(old, stream, indent=2, ensure_ascii=False)
+        stream.write("\n")
+    os.chmod(temporary, os.stat(old_path).st_mode & 0o777)
+    os.replace(temporary, old_path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+}
+
+prepare_outdated() {
+  local output_file=$1 row p v
+  local -a rows=() ok=() failed=()
+
+  [ -n "$output_file" ] || die "--prepare-outdated needs an output file"
+  mkdir -p "$(dirname "$output_file")"
+  : > "$output_file"
+
+  cd "$ROOT"
+  nvchecker -c nvchecker.toml >/dev/null 2>&1
+  mapfile -t rows < <(nvcmp -c nvchecker.toml)
+  [ ${#rows[@]} -gt 0 ] || { info "everything is up to date"; return 0; }
+  info "${#rows[@]} recipe(s) to prepare:"; printf '    %s\n' "${rows[@]}"
+
+  for row in "${rows[@]}"; do
+    # nvcmp prints: <name> <old version> -> <new version>
+    p=$(awk '{print $1}' <<<"$row")
+    v=$(awk '{print $NF}' <<<"$row")
+    info "$p: preparing vendor update to $v"
+    if (prepare_one "$p" "$v"); then
+      ok+=("$p")
+    else
+      failed+=("$p")
+      warn "$p: preparation failed"
+    fi
+  done
+
+  if [ ${#ok[@]} -gt 0 ]; then
+    advance_baseline "${ok[@]}"
+    printf '%s\n' "${ok[@]}" > "$output_file"
+  fi
+
+  if [ ${#failed[@]} -gt 0 ]; then
+    warn "${#failed[@]} preparation(s) failed: ${failed[*]}"
+    return 1
+  fi
+  info "prepared ${#ok[@]} update(s): ${ok[*]}"
+}
+
 case "${1:-}" in
   ''|-h|--help) usage ;;
 
@@ -234,6 +367,11 @@ case "${1:-}" in
     shift
     info "removing downloaded sources and build leftovers (re-downloadable from the PKGBUILDs)"
     clean_src "$@"
+    ;;
+
+  --prepare-outdated)
+    [ "$#" -eq 2 ] || die "usage: ./build.sh --prepare-outdated <packages-file>"
+    prepare_outdated "$2"
     ;;
 
   --outdated)
@@ -254,15 +392,7 @@ case "${1:-}" in
     # Only advance the baseline for packages that built; the failures stay listed
     # by the next --check.
     if [ ${#ok[@]} -gt 0 ]; then
-      python3 - "${ok[@]}" <<'PY'
-import json, sys
-done = set(sys.argv[1:])
-new = json.load(open('nvchecker-new.json'))['data']
-old = json.load(open('nvchecker-old.json'))
-for k in done:
-    if k in new: old['data'][k] = new[k]
-json.dump(old, open('nvchecker-old.json', 'w'), indent=2, ensure_ascii=False)
-PY
+      advance_baseline "${ok[@]}"
       git add nvchecker-old.json && git commit -qm "advance version baseline: ${ok[*]}" || true
     fi
 

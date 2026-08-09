@@ -3,7 +3,7 @@ pkgname=1password
 _tarver=8.12.30
 _tar="1password-${_tarver}.x64.tar.gz"
 pkgver=${_tarver//-/_}
-pkgrel=21
+pkgrel=22
 conflicts=('1password-beta' '1password-beta-bin')
 pkgdesc="Password manager and secure wallet"
 arch=('x86_64')
@@ -33,15 +33,11 @@ package() {
     # Install desktop file
     install -Dm0644 resources/1password.desktop -t "${pkgdir}"/usr/share/applications/
 
-    # Fill in policy kit file with a list of (the first 10) human users of the system.
-    export POLICY_OWNERS
-    POLICY_OWNERS="$(cut -d: -f1,3 /etc/passwd | grep -E ':[0-9]{4}$' | cut -d: -f1 | head -n 10 | sed 's/^/unix-user:/' | tr '\n' ' ')"
-    eval "cat <<EOF
-$(cat ./com.1password.1Password.policy.tpl)
-EOF" > ./com.1password.1Password.policy
-
-    # Install system unlock PolKit policy file
-    install -Dm0644 com.1password.1Password.policy -t "${pkgdir}"/usr/share/polkit-1/actions/
+    # The policy owner list must describe users on the target machine, not users
+    # in the build container. The install script renders this template after the
+    # package files have been installed.
+    install -Dm0644 com.1password.1Password.policy.tpl \
+        -t "${pkgdir}"/usr/share/1password/
 
     # Install examples
     install -Dm0644 resources/custom_allowed_browsers -t "${pkgdir}"/usr/share/doc/1password/examples/
@@ -52,7 +48,8 @@ EOF" > ./com.1password.1Password.policy
     mv "1password-${_tarver}.x64" "${pkgdir}/opt/1Password"
 
     # Cleanup un-needed files
-    rm "${pkgdir}"/opt/1Password/com.1password.1Password.policy "${pkgdir}"/opt/1Password/com.1password.1Password.policy.tpl "${pkgdir}"/opt/1Password/install_biometrics_policy.sh
+    rm "${pkgdir}"/opt/1Password/com.1password.1Password.policy.tpl \
+        "${pkgdir}"/opt/1Password/install_biometrics_policy.sh
     rm -r "${pkgdir}"/opt/1Password/resources/icons/
     rm "${pkgdir}"/opt/1Password/resources/1password.desktop "${pkgdir}"/opt/1Password/resources/custom_allowed_browsers
 

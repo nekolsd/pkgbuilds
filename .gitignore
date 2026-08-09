@@ -13,6 +13,7 @@
 # directories have to be allowed wholesale, or /*/* swallows things like
 # .github/workflows (which it did, once).
 !/.github/**
+!/ci/**
 !/*/PKGBUILD
 !/*/*.install
 !/*/*.patch

@@ -6,7 +6,7 @@ arch=('any')
 url="https://github.com/bbedward/pac-pacman-aliases"
 license=('MIT')
 source=("https://github.com/bbedward/pac-pacman-aliases/releases/download/v$pkgver/source_code_v$pkgver.zip")
-sha256sums=('SKIP')
+sha256sums=('22fe93138df6d25329fdf33218f3b07dba60e333495c56bee1974b3d888a9173')
 conflicts=('pac-wrapper')
 
 package() {

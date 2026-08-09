@@ -79,6 +79,23 @@ cannot open PRs.
 
 Then `shred -u /tmp/ci-subkey.asc`.
 
+### What those secrets can reach
+
+The build workflow has four separate jobs. `prepare` queries vendor endpoints,
+downloads sources, and updates checksums; `build` executes PKGBUILD functions and
+produces unsigned package artifacts. Both jobs have read-only repository access,
+disable checkout credential persistence, and receive no GPG or R2 secrets.
+
+A fresh `publish` job first validates the artifact file set against the exact names
+predicted by the prepare job, checks the SHA-256 manifest, and verifies each Arch
+package's declared name and version before the secret-bearing step starts. Only
+that step imports the signing subkey, signs packages and the database, and connects to R2. A final
+`commit` job has `contents: write`, but it accepts only a text patch touching
+`*/PKGBUILD` and `nvchecker-old.json`; it never executes package content. The
+vendor build output is still a trust decision -- checksum verification proves what
+was downloaded, not that vendor code is harmless -- but downloaded code cannot
+read the long-lived publishing credentials while it runs.
+
 ## 4. Seeding R2
 
 The first CI run produces nothing on its own: the nvchecker baseline is already
