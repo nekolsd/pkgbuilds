@@ -54,6 +54,11 @@ jobs:
       - name: Mark the checkout as safe for Git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      - name: Create the unprivileged preparation user
+        run: |
+          useradd -m prepareuser
+          chown -R prepareuser:prepareuser "$GITHUB_WORKSPACE"
+
       - name: Select packages and prepare vendor recipes
         id: selection
         env:
@@ -63,7 +68,14 @@ jobs:
           FORCE_PACKAGES: ${{ inputs.packages }}
         run: |
           output_dir="$RUNNER_TEMP/prepared"
-          ./ci/prepare.sh "$output_dir"
+          install -d -o prepareuser -g prepareuser -m0755 "$output_dir"
+          runuser -u prepareuser -- env \
+            HOME=/home/prepareuser \
+            EVENT_NAME="$EVENT_NAME" \
+            BEFORE_SHA="$BEFORE_SHA" \
+            CURRENT_SHA="$CURRENT_SHA" \
+            FORCE_PACKAGES="$FORCE_PACKAGES" \
+            ./ci/prepare.sh "$output_dir"
 
           if [ -s "$output_dir/packages.txt" ]; then
             echo 'has_builds=true' >> "$GITHUB_OUTPUT"
