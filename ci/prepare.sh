@@ -23,10 +23,22 @@ cd "$ROOT"
 
 event_name=${EVENT_NAME:-workflow_dispatch}
 current_sha=${CURRENT_SHA:-${GITHUB_SHA:-HEAD}}
+force_packages=${FORCE_PACKAGES:-}
 declare -a packages=()
 declare -A seen=()
 
-if [ "$event_name" = push ]; then
+if [ -n "$force_packages" ]; then
+  read -r -a requested_packages <<< "$force_packages"
+  [ ${#requested_packages[@]} -gt 0 ] || die "forced package list is empty"
+  for package in "${requested_packages[@]}"; do
+    valid_package "$package" || die "unsafe forced package name: $package"
+    [ -f "$package/PKGBUILD" ] || die "forced package has no PKGBUILD: $package"
+    [ -z "${seen[$package]+present}" ] || die "duplicate forced package: $package"
+    seen["$package"]=1
+    packages+=("$package")
+  done
+  printf 'forced package rebuild selected: %s\n' "${packages[*]}"
+elif [ "$event_name" = push ]; then
   before_sha=${BEFORE_SHA:-}
   if [ -n "$before_sha" ] \
      && [[ ! $before_sha =~ ^0+$ ]] \

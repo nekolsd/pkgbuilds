@@ -172,3 +172,7 @@ patched build is needed.
   install scripts, pacman hooks, patches, wrappers, and nested files as well as
   `PKGBUILD`. Increment `pkgrel` when changing packaging without changing
   `pkgver`, otherwise installed clients have no newer version to upgrade to.
+- **Manual rebuilds.** In Actions → Build and publish to R2 → Run workflow, set
+  the optional `packages` input to a space-separated list such as
+  `1password pac-pacman-aliases`. This bypasses nvchecker and rebuilds only those
+  existing local package recipes; it does not import or execute AUR content.

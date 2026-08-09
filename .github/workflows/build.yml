@@ -5,6 +5,11 @@ on:
     # 18:00 UTC, once a day
     - cron: '0 18 * * *'
   workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Optional space-separated package names to rebuild'
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -55,6 +60,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
+          FORCE_PACKAGES: ${{ inputs.packages }}
         run: |
           output_dir="$RUNNER_TEMP/prepared"
           ./ci/prepare.sh "$output_dir"
