@@ -1,0 +1,85 @@
+name: Import a new package from AUR
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Exact package base from aur.archlinux.org/packages/<name>'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: aur-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out main without storing credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Copy the complete AUR source tree
+        id: candidate
+        env:
+          AUR_PACKAGE: ${{ inputs.package }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit=$(bash ci/import-aur-package.sh "$AUR_PACKAGE")
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+
+          {
+            echo '### AUR package copied into a Draft PR'
+            echo
+            printf -- '- Package: `%s`\n' "$AUR_PACKAGE"
+            printf -- '- AUR commit: `%s`\n' "$commit"
+            echo '- No candidate file was sourced, built, or executed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open the Draft PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUR_PACKAGE: ${{ inputs.package }}
+          AUR_COMMIT: ${{ steps.candidate.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh auth setup-git --hostname github.com --force
+
+          branch="aur-import/$GITHUB_RUN_ID"
+          git -c core.hooksPath=/dev/null switch -c "$branch"
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit \
+            -m "$AUR_PACKAGE: import AUR source tree"
+          git -c core.hooksPath=/dev/null push origin "HEAD:refs/heads/$branch"
+
+          body="$RUNNER_TEMP/aur-import-pr.md"
+          {
+            printf '## Import `%s` from AUR\n\n' "$AUR_PACKAGE"
+            printf -- '- AUR commit: [`%s`](https://aur.archlinux.org/cgit/aur.git/commit/?h=%s&id=%s)\n' \
+              "$AUR_COMMIT" "$AUR_PACKAGE" "$AUR_COMMIT"
+            echo '- This PR contains the complete tracked source tree from that commit.'
+            echo '- The import workflow did not source, build, or execute any candidate file.'
+            echo
+            echo 'Review the **Files changed** tab, especially `PKGBUILD`, source URLs,'
+            echo 'checksums, install scripts, pacman hooks, executable files, symlinks,'
+            echo 'and binary files. Configure the vendor-driven nvchecker entry before merging.'
+          } > "$body"
+
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main --head "$branch" --draft \
+            --title "$AUR_PACKAGE: import AUR source tree" \
+            --body-file "$body"

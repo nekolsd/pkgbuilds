@@ -75,7 +75,7 @@ Settings → Secrets and variables → Actions:
 
 Also enable Settings → Actions → General → **Read and write permissions** and
 **Allow GitHub Actions to create and approve pull requests**, or `aur-watch.yml`
-cannot open PRs.
+and `aur-import.yml` cannot open Draft PRs.
 
 Then `shred -u /tmp/ci-subkey.asc`.
 
@@ -171,6 +171,12 @@ patched build is needed.
   commit. It reads candidate data only as bare Git objects and never checks files
   out into the package tree, sources them, builds them, or executes them. AUR
   failures do not affect the vendor-driven build workflow.
+- **New-package imports are review candidates, not updates.** Run
+  **Import a new package from AUR** manually with an exact package base name. Its
+  complete tracked AUR tree is copied into a package directory and shown in a
+  Draft PR; no candidate file is executed by the importer. Review that tree, then
+  configure `nvchecker.toml` and `nvchecker-old.json` from the official vendor and
+  sign the final accepted commit before merging.
 - **Reviewed local recipe changes rebuild the affected package.** This includes
   install scripts, pacman hooks, patches, wrappers, and nested files as well as
   `PKGBUILD`. Increment `pkgrel` when changing packaging without changing
