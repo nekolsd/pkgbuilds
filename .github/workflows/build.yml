@@ -27,15 +27,20 @@ permissions:
 
 concurrency:
   # One publisher at a time, so two runs never rewrite the R2 database together.
+  # Keep every pending push: GitHub otherwise replaces an older pending run with
+  # the newest one, which could skip a package change made by the canceled run.
   group: build-and-publish
+  queue: max
   cancel-in-progress: false
 
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     container:
       image: archlinux:base-devel
     outputs:
+      prepared_sha: ${{ steps.selection.outputs.prepared_sha }}
       has_builds: ${{ steps.selection.outputs.has_builds }}
       has_recipe_changes: ${{ steps.selection.outputs.has_recipe_changes }}
 
@@ -45,9 +50,13 @@ jobs:
           pacman -Syu --noconfirm --needed \
             git nvchecker pacman-contrib python
 
-      - name: Check out without stored credentials
+      # A queued run may have been created from an older event SHA. Resolve main
+      # only after this run owns the concurrency group, then keep every later job
+      # on this exact snapshot.
+      - name: Check out the latest main without stored credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: main
           fetch-depth: 0
           persist-credentials: false
 
@@ -64,19 +73,20 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
-          CURRENT_SHA: ${{ github.sha }}
           FORCE_PACKAGES: ${{ inputs.packages }}
         run: |
           output_dir="$RUNNER_TEMP/prepared"
+          prepared_sha=$(git rev-parse HEAD)
           install -d -o prepareuser -g prepareuser -m0755 "$output_dir"
           runuser -u prepareuser -- env \
             HOME=/home/prepareuser \
             EVENT_NAME="$EVENT_NAME" \
             BEFORE_SHA="$BEFORE_SHA" \
-            CURRENT_SHA="$CURRENT_SHA" \
+            CURRENT_SHA="$prepared_sha" \
             FORCE_PACKAGES="$FORCE_PACKAGES" \
             ./ci/prepare.sh "$output_dir"
 
+          printf 'prepared_sha=%s\n' "$prepared_sha" >> "$GITHUB_OUTPUT"
           if [ -s "$output_dir/packages.txt" ]; then
             echo 'has_builds=true' >> "$GITHUB_OUTPUT"
           else
@@ -100,6 +110,7 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.has_builds == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     container:
       image: archlinux:base-devel
 
@@ -109,9 +120,10 @@ jobs:
           pacman -Syu --noconfirm --needed \
             git gnupg openssh python sudo
 
-      - name: Check out without stored credentials
+      - name: Check out the prepared source snapshot
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.prepare.outputs.prepared_sha }}
           persist-credentials: false
 
       - name: Mark the checkout as safe for Git
@@ -155,6 +167,7 @@ jobs:
     needs: [prepare, build]
     if: needs.prepare.outputs.has_builds == 'true' && needs.build.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     container:
       image: archlinux:base-devel
 
@@ -164,9 +177,10 @@ jobs:
           pacman -Syu --noconfirm --needed \
             git gnupg rclone
 
-      - name: Check out without stored credentials
+      - name: Check out the prepared source snapshot
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.prepare.outputs.prepared_sha }}
           persist-credentials: false
 
       - name: Download unsigned packages
@@ -206,6 +220,7 @@ jobs:
     needs: [prepare, publish]
     if: needs.prepare.outputs.has_recipe_changes == 'true' && needs.publish.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
 
@@ -213,7 +228,7 @@ jobs:
       - name: Check out the latest branch head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.ref_name }}
+          ref: main
           fetch-depth: 0
 
       - name: Download prepared metadata
@@ -230,4 +245,4 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git commit -m 'CI: advance published vendor versions [skip ci]'
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin HEAD:main

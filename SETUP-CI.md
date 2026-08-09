@@ -161,7 +161,10 @@ patched build is needed.
 - **The subkey expires 2027-08-08.** Issue a new one with `gpg --quick-add-key`
   before then and update `GPG_SIGNING_KEY` / `GPG_KEY_ID`, or CI signing breaks.
 - **Concurrency** is capped in both workflows: builds cannot rewrite R2 at the
-  same time, and AUR checks cannot race while updating a review branch.
+  same time, and AUR checks cannot race while updating a review branch. Build
+  runs use GitHub's full pending queue, then resolve the latest `main` snapshot
+  only when they start, so an intermediate push is neither dropped nor able to
+  publish an older source snapshot after a newer one.
 - **Upload order** is packages first, database last, so a failure halfway leaves the
   index pointing at versions that are all still present.
 - **AUR is advisory only.** `aur-watch.yml` opens a Draft PR for every changed AUR
