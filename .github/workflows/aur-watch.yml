@@ -35,6 +35,12 @@ jobs:
           # write credential available while the untrusted objects are inspected.
           persist-credentials: false
 
+      # Container jobs can see the bind-mounted checkout under a different UID.
+      # Git otherwise rejects the repository when gh configures its credential
+      # helper in the write-enabled step below.
+      - name: Mark the checkout as safe for Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Find changed AUR commits
         id: scan
         shell: bash
