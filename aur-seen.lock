@@ -1,7 +1,7 @@
 # Last reviewed AUR commit for each package. A change to any remote commit opens
 # a review PR; this file never controls vendor version discovery or builds.
 1password	d991324ae2605a3142318cd33fe3d7da6a9f98eb
-64gram-desktop-bin	d41d55823b3825a5b09eba2834b2ba79a814a9d5
+64gram-desktop-bin	5ec268cc1f3bb8ffd01e3d0946c0a2894700ebbc
 claude-code	17784e502f8e85b945a662c63a39abd9f1fbebbe
 google-chrome	cf617f18280a369fd9dff2849c3161163badf264
 helium-browser-bin	59527d80d4a3e06f86c411c4866cb7c374e5f940
