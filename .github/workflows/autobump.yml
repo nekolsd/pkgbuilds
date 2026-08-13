@@ -218,8 +218,9 @@ jobs:
             --json number --jq '.[0].number // empty')
           if git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch" \
               2>/dev/null; then
+            branch_base=$(git merge-base origin/main "origin/$branch")
             mapfile -d '' -t branch_paths < <(
-              git diff --name-only -z origin/main "origin/$branch" --)
+              git diff --name-only -z "$branch_base" "origin/$branch" --)
             if [ ${#branch_paths[@]} -eq 0 ]; then
               branch_is_bot_owned=true
             elif [ ${#branch_paths[@]} -eq 1 ] \
@@ -248,9 +249,10 @@ jobs:
               exit 1
             fi
 
-            if [ -f "$RUNNER_TEMP/autobump/existing.PKGBUILD" ] \
-                && cmp -s "$RUNNER_TEMP/autobump/existing.PKGBUILD" \
-                  "$PACKAGE/PKGBUILD"; then
+            # Compare the complete candidate tree, not only PKGBUILD. An old bot
+            # branch may contain the right version while missing newer main
+            # commits; in that case rebuild it on the current main snapshot.
+            if git diff --quiet "origin/$branch" --; then
               push_candidate=false
             else
               push_candidate=true
