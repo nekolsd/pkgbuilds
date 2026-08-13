@@ -300,11 +300,69 @@ jobs:
             fi
           fi
 
-          # GITHUB_TOKEN-authored pushes/PRs do not recursively emit normal
-          # push or pull_request workflows. workflow_dispatch is the supported
-          # exception, so explicitly build the exact candidate branch. build.yml
-          # permits publishing only from refs/heads/main.
-          if [ "$push_candidate" = true ] || [ -z "$pr_number" ]; then
+          # GitHub creates pull_request runs caused by GITHUB_TOKEN in an
+          # approval-required state. This branch has already passed the bot-owned
+          # path check and parsed-IR contract above, so approve only the run for
+          # its exact SHA. If the installation token cannot approve it (or GitHub
+          # has not created it yet), workflow_dispatch remains the safe fallback.
+          candidate_ref=$(git ls-remote --exit-code origin "refs/heads/$branch")
+          candidate_sha=${candidate_ref%%[[:space:]]*}
+          [[ $candidate_sha =~ ^[0-9a-f]{40,64}$ ]] \
+            || { echo 'Could not resolve the candidate branch SHA.' >&2; exit 1; }
+          native_check=false
+          for attempt in 1 2 3 4 5 6; do
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow build.yml --event pull_request --branch "$branch" \
+              --commit "$candidate_sha" --limit 10 \
+              --json databaseId,headSha,status,conclusion)
+            decision=$(RUNS_JSON="$runs" CANDIDATE_SHA="$candidate_sha" \
+              python3 - <<'PY'
+          import json
+          import os
+          rows = [
+              row for row in json.loads(os.environ["RUNS_JSON"])
+              if row["headSha"] == os.environ["CANDIDATE_SHA"]
+          ]
+          waiting = next(
+              (row for row in rows if row.get("conclusion") == "action_required"),
+              None,
+          )
+          if waiting:
+              print(f"approve:{waiting['databaseId']}")
+          elif rows:
+              print("exists")
+          else:
+              print("missing")
+          PY
+            )
+            case "$decision" in
+              approve:*)
+                run_id=${decision#approve:}
+                if gh api --method POST \
+                    "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/approve" \
+                    >/dev/null; then
+                  echo "Approved native pull_request run $run_id for $candidate_sha."
+                  native_check=true
+                else
+                  echo "::warning title=Native PR check needs approval::Falling back to a credential-free dispatched build"
+                fi
+                break
+                ;;
+              exists)
+                echo "A native pull_request run already exists for $candidate_sha."
+                native_check=true
+                break
+                ;;
+              missing)
+                [ "$attempt" -eq 6 ] || sleep 5
+                ;;
+              *) echo "Unexpected PR-run decision: $decision" >&2; exit 1 ;;
+            esac
+          done
+
+          # Candidate dispatch can never publish: build.yml permits signing/R2
+          # only from refs/heads/main.
+          if [ "$native_check" = false ]; then
             gh workflow run build.yml --repo "$GITHUB_REPOSITORY" \
               --ref "$branch" -f packages="$PACKAGE"
           fi

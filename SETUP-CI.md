@@ -108,9 +108,12 @@ retry. Vendor output is still a trust decision -- checksum verification identifi
 bytes but does not make vendor code harmless -- but downloaded code cannot read the
 long-lived publishing credentials while it runs.
 
-Autobump branches are built through an explicit `workflow_dispatch`, because
-GitHub deliberately suppresses recursive `push`/`pull_request` runs created by
-`GITHUB_TOKEN`. The build workflow checks the dispatched branch commit but has a
+GitHub creates `pull_request` runs caused by `GITHUB_TOKEN` in an
+approval-required state. After proving that an autobump branch changes only its
+package's release-only PKGBUILD, the vendor workflow uses its narrowly granted
+`actions: write` permission to approve only the run for that exact commit. If the
+native run is unavailable or GitHub rejects that approval, an explicit
+`workflow_dispatch` builds the same commit instead. The build workflow has a
 separate hard gate: signing and R2 publication are possible only for a `push` to
 `main` or a manual dispatch whose ref is exactly `refs/heads/main`.
 
