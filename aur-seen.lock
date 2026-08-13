@@ -1,6 +1,6 @@
 # Last reviewed AUR commit for each package. A change to any remote commit opens
 # a review PR; this file never controls vendor version discovery or builds.
-1password	d991324ae2605a3142318cd33fe3d7da6a9f98eb
+1password	8a18b7b9c8ddbb05c2905cb53c2bad53083bb199
 64gram-desktop-bin	5ec268cc1f3bb8ffd01e3d0946c0a2894700ebbc
 claude-code	4014b6271114762ef29d1252562612c318c29daa
 google-chrome	041d1e50029c86fa356e5eae19072c151fb50574
