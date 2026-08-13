@@ -156,9 +156,11 @@ jobs:
         run: |
           useradd -m policyuser
           install -d -o policyuser -g policyuser -m0755 /policy
+          policy_dir="/policy/policy-$PACKAGE"
+          install -d -o policyuser -g policyuser -m0755 "$policy_dir"
           chown -R policyuser:policyuser "$GITHUB_WORKSPACE/$PACKAGE"
           runuser -u policyuser -- env HOME=/home/policyuser \
-            ./ci/prepare-package.sh "$PACKAGE" /policy
+            ./ci/prepare-package.sh "$PACKAGE" "$policy_dir"
           chown -R root:root /policy
           chmod -R a-w /policy
 
@@ -224,10 +226,13 @@ jobs:
               /home/builduser/expected-packages.tsv /artifacts
 
       - name: Assemble the successful matrix artifact
+        env:
+          PACKAGE: ${{ matrix.package }}
         run: |
-          install -d -m0755 "$RUNNER_TEMP/built/packages"
+          artifact_dir="$RUNNER_TEMP/built/built-$PACKAGE/packages"
+          install -d -m0755 "$artifact_dir"
           find /artifacts -mindepth 1 -maxdepth 1 -type f \
-            -exec install -m0644 -t "$RUNNER_TEMP/built/packages" -- {} +
+            -exec install -m0644 -t "$artifact_dir" -- {} +
 
       - name: Upload this successful package build
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -266,12 +271,16 @@ jobs:
         with:
           pattern: built-*
           path: ${{ runner.temp }}/downloads
+          # v5+ flattens a pattern that happens to match only one artifact.
+          # Every upload therefore carries its own unique top-level directory.
+          merge-multiple: true
 
       - name: Download policies from the separate metadata jobs
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           pattern: policy-*
           path: ${{ runner.temp }}/policies
+          merge-multiple: true
 
       - name: Validate and combine successes before exposing secrets
         run: |

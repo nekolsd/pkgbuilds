@@ -20,6 +20,9 @@
       "gitref": "refs/tags/0.15.4.1",
       "url": "https://github.com/imputnet/helium-linux/releases/tag/0.15.4.1"
     },
+    "openai-codex-bin": {
+      "version": "0.147.0"
+    },
     "pac-pacman-aliases": {
       "version": "1.9.9"
     },

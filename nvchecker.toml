@@ -58,6 +58,13 @@ source = "regex"
 url = "https://downloads.claude.ai/claude-code-releases/latest"
 regex = '([\d.]+)'
 
+# OpenAI's installer follows this vendor-owned channel. It points at the latest
+# non-prerelease Codex bundle even while alpha releases continue on GitHub.
+[openai-codex-bin]
+source = "regex"
+url = "https://releases.openai.com/codex/channels/latest"
+regex = '"tag_name":\s*"rust-v([\d.]+)"'
+
 # 1Password publishes no version API, but its apt repository metadata carries one.
 # Several fields sit between `Package:` and `Version:`, hence the lazy multi-line
 # match; requiring a newline right after "1password" keeps it from matching the

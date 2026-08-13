@@ -45,6 +45,15 @@
       },
       "automerge": false
     },
+    "openai-codex-bin": {
+      "version_fields": ["pkgver"],
+      "release_fields": ["pkgver", "pkgrel"],
+      "remote_checksums": {
+        "sha256sums_x86_64": [0, 1],
+        "sha256sums_aarch64": [0, 1]
+      },
+      "automerge": false
+    },
     "pac-pacman-aliases": {
       "version_fields": ["pkgver"],
       "release_fields": ["pkgver", "pkgrel"],
