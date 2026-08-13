@@ -179,10 +179,13 @@ jobs:
           gh auth setup-git --hostname github.com --force
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git fetch origin main
 
           while IFS=$'\t' read -r pkg old_commit new_commit classification; do
             branch="aur-watch/$pkg"
             body="/tmp/aur-$pkg.md"
+            branch_advanced=false
+            candidate_changed=false
 
             pr_number=$(gh pr list \
               --repo "$GITHUB_REPOSITORY" \
@@ -193,6 +196,15 @@ jobs:
               git fetch origin \
                 "refs/heads/$branch:refs/remotes/origin/$branch"
               git checkout -B "$branch" "origin/$branch"
+              if ! git merge-base --is-ancestor origin/main HEAD; then
+                if git -c commit.gpgsign=false merge --no-edit origin/main; then
+                  branch_advanced=true
+                else
+                  git merge --abort || true
+                  echo "::warning title=AUR review branch conflict::$pkg was preserved for manual reconciliation"
+                  continue
+                fi
+              fi
               new_pr=false
             else
               # Fetch a stale closed-PR branch, if one exists, only to establish a
@@ -209,11 +221,16 @@ jobs:
               # main still has the old baseline until this PR is merged, so the
               # scanner will rediscover it every day. Preserve the reviewer's PR
               # body and ready/draft choice when the candidate itself is unchanged.
-              echo "::notice::$pkg review PR already tracks ${new_commit:0:12}"
-              continue
+              if [ "$branch_advanced" = false ]; then
+                echo "::notice::$pkg review PR already tracks ${new_commit:0:12}"
+                continue
+              fi
+            else
+              git add aur-seen.lock
+              git -c commit.gpgsign=false commit \
+                -m "$pkg: review AUR commit ${new_commit:0:12}"
+              candidate_changed=true
             fi
-            git add aur-seen.lock
-            git commit -m "$pkg: review AUR commit ${new_commit:0:12}"
 
             if [ "$new_pr" = true ]; then
               git push --force-with-lease origin "HEAD:refs/heads/$branch"
@@ -224,11 +241,15 @@ jobs:
                 --body-file "$body"
             else
               git push origin "HEAD:refs/heads/$branch"
-              gh pr edit "$pr_number" \
-                --repo "$GITHUB_REPOSITORY" \
-                --title "$pkg: review AUR commit ${new_commit:0:12}" \
-                --body-file "$body"
-              # A newer AUR commit invalidates any earlier readiness decision.
-              gh pr ready "$pr_number" --repo "$GITHUB_REPOSITORY" --undo || true
+              if [ "$candidate_changed" = true ]; then
+                gh pr edit "$pr_number" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --title "$pkg: review AUR commit ${new_commit:0:12}" \
+                  --body-file "$body"
+                # A newer AUR commit invalidates any earlier readiness decision.
+                gh pr ready "$pr_number" --repo "$GITHUB_REPOSITORY" --undo || true
+              else
+                echo "::notice::$pkg review branch was synchronized with main"
+              fi
             fi
           done < /tmp/aur-reviewable.tsv
