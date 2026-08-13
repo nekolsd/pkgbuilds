@@ -156,6 +156,7 @@ jobs:
         run: |
           useradd -m policyuser
           install -d -o policyuser -g policyuser -m0755 /policy
+          chown -R policyuser:policyuser "$GITHUB_WORKSPACE/$PACKAGE"
           runuser -u policyuser -- env HOME=/home/policyuser \
             ./ci/prepare-package.sh "$PACKAGE" /policy
           chown -R root:root /policy
