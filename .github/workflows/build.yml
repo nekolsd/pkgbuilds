@@ -215,10 +215,11 @@ jobs:
           useradd -m builduser
           echo 'builduser ALL=(root) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builduser
           install -d -o builduser -g builduser -m0755 /artifacts
+          policy_dir="/policy/policy-$PACKAGE"
           install -o builduser -g builduser -m0644 \
-            /policy/packages.txt /home/builduser/packages.txt
+            "$policy_dir/packages.txt" /home/builduser/packages.txt
           install -o builduser -g builduser -m0644 \
-            /policy/expected-packages.tsv \
+            "$policy_dir/expected-packages.tsv" \
             /home/builduser/expected-packages.tsv
           chown -R builduser:builduser "$GITHUB_WORKSPACE"
           runuser -u builduser -- env HOME=/home/builduser \
