@@ -2,6 +2,7 @@
 # Read-only AUR change watcher.
 #
 #   ./aur-watch.sh check                       list changed packages as TSV
+#   ./aur-watch.sh classify <pkg> <old> <new>  classify with parsed Bash IR
 #   ./aur-watch.sh report <pkg> <old> <new>    render a review body as Markdown
 #   ./aur-watch.sh set-seen <pkg> <commit>     advance one entry in aur-seen.lock
 #
@@ -102,6 +103,78 @@ check_all() {
     warn "$failures package(s) could not be checked; this does not affect vendor-driven builds"
   fi
 }
+
+classify_change() (
+  [ $# -eq 3 ] || die "usage: $0 classify <pkg> <old-commit> <new-commit>"
+  local pkg=$1 old=$2 new=$3
+  valid_pkg "$pkg" || die "invalid package name: $pkg"
+  valid_commit "$old" || die "invalid baseline commit: $old"
+  valid_commit "$new" || die "invalid candidate commit: $new"
+
+  local tmp repo url actual old_tree new_tree path quoted entry mode result
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  repo="$tmp/aur.git"
+  url=$(remote_url "$pkg")
+
+  git init --bare -q "$repo"
+  git -C "$repo" fetch -q --no-tags --depth=50 "$url" \
+    refs/heads/master:refs/remotes/aur/master \
+    || die "$pkg: failed to fetch AUR objects"
+  actual=$(git -C "$repo" rev-parse 'refs/remotes/aur/master^{commit}')
+  [ "$actual" = "$new" ] \
+    || die "$pkg: AUR changed during classification ($new -> $actual); retry next run"
+
+  if ! git -C "$repo" cat-file -e "$old^{commit}" 2>/dev/null; then
+    git -C "$repo" fetch -q --no-tags --depth=1 "$url" "$old" 2>/dev/null || true
+  fi
+  if ! git -C "$repo" cat-file -e "$old^{commit}" 2>/dev/null; then
+    printf 'unknown\tfalse\tthe previous AUR commit is no longer fetchable\n'
+    exit 0
+  fi
+
+  old_tree=$(git -C "$repo" rev-parse "$old^{tree}")
+  new_tree=$(git -C "$repo" rev-parse "$new^{tree}")
+
+  # A release-only AUR update may change PKGBUILD and its generated .SRCINFO.
+  # Any helper, patch, hook, symlink, binary, deletion, or mode change remains a
+  # review event; none of those objects is materialized or executed here.
+  while IFS= read -r -d '' path; do
+    case "$path" in
+      PKGBUILD|.SRCINFO) ;;
+      *)
+        printf -v quoted '%q' "$path"
+        printf 'review\tfalse\tAUR changed an additional tracked path: %s\n' "$quoted"
+        exit 0
+        ;;
+    esac
+  done < <(git -C "$repo" diff --name-only -z "$old_tree" "$new_tree" --)
+
+  for tree in "$old_tree" "$new_tree"; do
+    entry=$(git -C "$repo" ls-tree "$tree" -- PKGBUILD)
+    mode=${entry%% *}
+    if [ "$mode" != 100644 ]; then
+      printf 'unknown\tfalse\tPKGBUILD is missing or is not a regular non-executable file\n'
+      exit 0
+    fi
+  done
+  for tree in "$old_tree" "$new_tree"; do
+    entry=$(git -C "$repo" ls-tree "$tree" -- .SRCINFO)
+    if [ -z "$entry" ] || [ "${entry%% *}" != 100644 ]; then
+      printf 'review\tfalse\t.SRCINFO is missing or has an unexpected file mode\n'
+      exit 0
+    fi
+  done
+
+  git -C "$repo" cat-file blob "$old:PKGBUILD" > "$tmp/old.PKGBUILD"
+  git -C "$repo" cat-file blob "$new:PKGBUILD" > "$tmp/new.PKGBUILD"
+  if ! result=$(python3 "$ROOT/ci/recipe-ir.py" compare "$pkg" \
+      "$tmp/old.PKGBUILD" "$tmp/new.PKGBUILD" --format tsv); then
+    printf 'unknown\tfalse\tthe Bash IR classifier failed\n'
+    exit 0
+  fi
+  printf '%s\n' "$result"
+)
 
 html_escape() {
   iconv -f UTF-8 -t UTF-8 -c 2>/dev/null \
@@ -280,6 +353,10 @@ case "${1:-}" in
   check)
     [ $# -eq 1 ] || usage
     check_all
+    ;;
+  classify)
+    shift
+    classify_change "$@"
     ;;
   report)
     shift

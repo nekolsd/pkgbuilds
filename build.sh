@@ -5,6 +5,8 @@
 #   ./build.sh --outdated         build everything nvchecker reports as behind
 #   ./build.sh --prepare-outdated <file>
 #                                  update recipes/checksums only; write package names
+#   ./build.sh --prepare-one <pkg> <version>
+#                                  update one recipe/checksums without advancing state
 #   ./build.sh --check            run nvchecker only, list what is behind
 #   ./build.sh --clean-src [pkg]  drop downloaded sources and build leftovers
 set -euo pipefail
@@ -372,6 +374,11 @@ case "${1:-}" in
   --prepare-outdated)
     [ "$#" -eq 2 ] || die "usage: ./build.sh --prepare-outdated <packages-file>"
     prepare_outdated "$2"
+    ;;
+
+  --prepare-one)
+    [ "$#" -eq 3 ] || die "usage: ./build.sh --prepare-one <package> <version>"
+    prepare_one "$2" "$3"
     ;;
 
   --outdated)

@@ -1,7 +1,8 @@
 # CI build and R2 distribution
 
-GitHub Actions builds on a schedule, signs, and pushes to Cloudflare R2, so the
-desktop side only ever runs `pacman -Syu`.
+GitHub Actions proposes vendor updates, builds packages independently, signs
+successful artifacts, and pushes them to Cloudflare R2, so the desktop side only
+ever runs `pacman -Syu`.
 
 ## 1. GPG key
 
@@ -74,27 +75,44 @@ Settings → Secrets and variables → Actions:
 | `R2_BUCKET` | bucket name |
 
 Also enable Settings → Actions → General → **Read and write permissions** and
-**Allow GitHub Actions to create and approve pull requests**, or `aur-watch.yml`
-and `aur-import.yml` cannot open Draft PRs.
+**Allow GitHub Actions to create and approve pull requests**, or `autobump.yml`,
+`aur-watch.yml`, and `aur-import.yml` cannot create their PRs.
 
 Then `shred -u /tmp/ci-subkey.asc`.
 
 ### What those secrets can reach
 
-The build workflow has four separate jobs. `prepare` queries vendor endpoints,
-downloads sources, and updates checksums; `build` executes PKGBUILD functions and
-produces unsigned package artifacts. Both jobs have read-only repository access,
-disable checkout credential persistence, and receive no GPG or R2 secrets.
+The vendor update workflow has two trust phases. `detect` queries configured
+official endpoints. Each `autobump` matrix job changes one local recipe, downloads
+its declared sources, recalculates checksums, and uses shfmt's Bash syntax tree plus
+`update-policy.json` to classify the exact change. Checkout credentials are not
+persisted and `GH_TOKEN` is exposed only in the final PR-writing step, after source
+preparation has finished. An AUR packaging review can only make that PR Draft; AUR
+does not supply any written field.
 
-A fresh `publish` job first validates the artifact file set against the exact names
-predicted by the prepare job, checks the SHA-256 manifest, and verifies each Arch
-package's declared name and version before the secret-bearing step starts. Only
-that step imports the signing subkey, signs packages and the database, and connects to R2. A final
-`commit` job has `contents: write`, but it accepts only a text patch touching
-`*/PKGBUILD` and `nvchecker-old.json`; it never executes package content. The
-vendor build output is still a trust decision -- checksum verification proves what
-was downloaded, not that vendor code is harmless -- but downloaded code cannot
-read the long-lived publishing credentials while it runs.
+The build workflow first validates every parsed update contract and test. Each
+package first gets an independent, unprivileged metadata-policy matrix job, then an
+independent credential-free build matrix job. Its expected package names and versions
+are uploaded before the build starts. The publisher downloads that original policy
+again instead of accepting any policy returned by a build job (whose package code can
+invoke `sudo pacman`). A fresh `publish` job downloads only successful matrix
+artifacts, validates every file set, SHA-256 manifest, Arch package name, and version,
+then combines those successes. Only the subsequent step receives the GPG and R2
+secrets. One failed matrix package therefore cannot block successful siblings.
+
+The final `record` job receives no package content and executes no PKGBUILD. It has
+`contents: write`, validates a strict package/version TSV, and advances only the
+`version` fields in `nvchecker-old.json` after the R2 step succeeds. If publication
+fails, the old value remains and the next vendor run dispatches a package-specific
+retry. Vendor output is still a trust decision -- checksum verification identifies
+bytes but does not make vendor code harmless -- but downloaded code cannot read the
+long-lived publishing credentials while it runs.
+
+Autobump branches are built through an explicit `workflow_dispatch`, because
+GitHub deliberately suppresses recursive `push`/`pull_request` runs created by
+`GITHUB_TOKEN`. The build workflow checks the dispatched branch commit but has a
+separate hard gate: signing and R2 publication are possible only for a `push` to
+`main` or a manual dispatch whose ref is exactly `refs/heads/main`.
 
 ## 4. Seeding R2
 
@@ -160,17 +178,19 @@ patched build is needed.
 
 - **The subkey expires 2027-08-08.** Issue a new one with `gpg --quick-add-key`
   before then and update `GPG_SIGNING_KEY` / `GPG_KEY_ID`, or CI signing breaks.
-- **Concurrency** is capped in both workflows: builds cannot rewrite R2 at the
-  same time, and AUR checks cannot race while updating a review branch. Build
-  runs use GitHub's full pending queue, then resolve the latest `main` snapshot
-  only when they start, so an intermediate push is neither dropped nor able to
-  publish an older source snapshot after a newer one.
+- **Schedule order.** Parsed AUR review runs at 18:00 Asia/Singapore. Official
+  vendor detection runs eight hours later at 02:00, giving structural AUR signals
+  time to gate only their matching autobump package.
+- **Concurrency** is capped: publishers cannot rewrite R2 simultaneously, vendor
+  detectors do not race on an autobump branch, and AUR checks do not race while
+  updating review baselines. Pull-request builds use separate per-PR groups.
 - **Upload order** is packages first, database last, so a failure halfway leaves the
   index pointing at versions that are all still present.
-- **AUR is advisory only.** `aur-watch.yml` opens a Draft PR for every changed AUR
-  commit. It reads candidate data only as bare Git objects and never checks files
-  out into the package tree, sources them, builds them, or executes them. AUR
-  failures do not affect the vendor-driven build workflow.
+- **AUR is advisory only.** `aur-watch.yml` parses old/new AUR PKGBUILDs from bare
+  Git objects. Release-only changes are acknowledged without PRs; additional files,
+  structural IR differences, and unknown syntax open Draft reviews. No AUR object
+  is checked out, sourced, built, or executed, and AUR failures do not affect the
+  vendor workflow.
 - **New-package imports are review candidates, not updates.** Run
   **Import a new package from AUR** manually with an exact package base name. Its
   complete tracked AUR tree is copied into a package directory and shown in a
@@ -181,7 +201,10 @@ patched build is needed.
   install scripts, pacman hooks, patches, wrappers, and nested files as well as
   `PKGBUILD`. Increment `pkgrel` when changing packaging without changing
   `pkgver`, otherwise installed clients have no newer version to upgrade to.
-- **Manual rebuilds.** In Actions → Build and publish to R2 → Run workflow, set
-  the optional `packages` input to a space-separated list such as
-  `1password pac-pacman-aliases`. This bypasses nvchecker and rebuilds only those
-  existing local package recipes; it does not import or execute AUR content.
+- **Manual update checks.** Run **Check official vendor updates** with an optional
+  space-separated package filter. This creates/updates one autobump PR per official
+  update and never publishes directly.
+- **Manual rebuilds.** In **Build and publish to R2**, set `packages` to a list such
+  as `1password pac-pacman-aliases`. It rebuilds those immutable local recipes in
+  separate matrix jobs and bypasses version discovery. Leaving it blank retries
+  versions already merged to `main` but not yet recorded as successfully published.

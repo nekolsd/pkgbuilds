@@ -1,114 +1,184 @@
 name: Build and publish to R2
 
 on:
-  schedule:
-    # 18:00 UTC, once a day
-    - cron: '0 18 * * *'
   workflow_dispatch:
     inputs:
       packages:
-        description: 'Optional space-separated package names to rebuild'
+        description: 'Space-separated packages; blank retries unpublished vendor versions'
         required: false
         type: string
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '*/**'
+      - 'ci/**'
+      - 'tests/**'
+      - 'build.sh'
+      - 'aur-watch.sh'
+      - 'nvchecker.toml'
+      - 'nvchecker-old.json'
+      - 'update-policy.json'
+      - '.github/workflows/*.yml'
   push:
     branches:
       - main
     paths:
       # A reviewed recipe change can be a hook, install script, patch, wrapper,
-      # desktop file, or even a nested source file -- not just PKGBUILD.
+      # desktop file, or nested source file -- not just PKGBUILD.
       - '*/**'
-      - '!.github/**'
-      - '.github/workflows/build.yml'
+      - 'ci/**'
+      - 'tests/**'
+      - 'build.sh'
+      - 'aur-watch.sh'
+      - 'nvchecker.toml'
+      - 'nvchecker-old.json'
+      - 'update-policy.json'
+      - '.github/workflows/*.yml'
 
-# Jobs inherit read-only repository access. Only `commit` receives write access,
-# and that job never executes a PKGBUILD or package artifact.
+# Pull requests receive only build/test access. Publishing is additionally gated
+# by event type in the publish job; only the final state job can write main.
 permissions:
   contents: read
 
 concurrency:
-  # One publisher at a time, so two runs never rewrite the R2 database together.
-  # Keep every pending push: GitHub otherwise replaces an older pending run with
-  # the newest one, which could skip a package change made by the canceled run.
-  group: build-and-publish
+  group: ${{ github.event_name == 'pull_request' && format('build-pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' && format('build-candidate-{0}', github.ref_name) || 'build-and-publish' }}
   queue: max
+  # GitHub forbids queue:max together with a true cancel-in-progress value.
+  # Retaining each check is preferable to weakening the serialized main queue.
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  select:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     container:
-      image: archlinux:base-devel
+      image: archlinux:base
     outputs:
-      prepared_sha: ${{ steps.selection.outputs.prepared_sha }}
+      snapshot_sha: ${{ steps.selection.outputs.snapshot_sha }}
       has_builds: ${{ steps.selection.outputs.has_builds }}
-      has_recipe_changes: ${{ steps.selection.outputs.has_recipe_changes }}
+      matrix: ${{ steps.selection.outputs.matrix }}
 
     steps:
-      - name: Install preparation tools
-        run: |
-          pacman -Syu --noconfirm --needed \
-            git nvchecker pacman-contrib python
+      - name: Install selection tools
+        run: pacman -Syu --noconfirm --needed git python
 
-      # A queued run may have been created from an older event SHA. Resolve main
-      # only after this run owns the concurrency group, then keep every later job
-      # on this exact snapshot.
-      - name: Check out the latest main without stored credentials
+      # Main publications resolve the newest branch head only after this workflow
+      # owns the serialized publisher. PR and explicitly dispatched autobump
+      # checks use their exact candidate commit and can never publish below.
+      - name: Check out the immutable source candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: main
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'workflow_dispatch' && github.sha || 'main' }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Mark the checkout as safe for Git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Create the unprivileged preparation user
-        run: |
-          useradd -m prepareuser
-          chown -R prepareuser:prepareuser "$GITHUB_WORKSPACE"
-
-      - name: Select packages and prepare vendor recipes
+      - name: Select independent package builds
         id: selection
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           FORCE_PACKAGES: ${{ inputs.packages }}
+        shell: bash
         run: |
-          output_dir="$RUNNER_TEMP/prepared"
-          prepared_sha=$(git rev-parse HEAD)
-          install -d -o prepareuser -g prepareuser -m0755 "$output_dir"
-          runuser -u prepareuser -- env \
-            HOME=/home/prepareuser \
-            EVENT_NAME="$EVENT_NAME" \
-            BEFORE_SHA="$BEFORE_SHA" \
-            CURRENT_SHA="$prepared_sha" \
-            FORCE_PACKAGES="$FORCE_PACKAGES" \
+          output_dir="$RUNNER_TEMP/selection"
+          snapshot_sha=$(git rev-parse HEAD)
+          EVENT_NAME="$EVENT_NAME" \
+          BASE_SHA="$BASE_SHA" \
+          CURRENT_SHA="$snapshot_sha" \
+          FORCE_PACKAGES="$FORCE_PACKAGES" \
             ./ci/prepare.sh "$output_dir"
 
-          printf 'prepared_sha=%s\n' "$prepared_sha" >> "$GITHUB_OUTPUT"
+          printf 'snapshot_sha=%s\n' "$snapshot_sha" >> "$GITHUB_OUTPUT"
+          printf 'matrix=%s\n' "$(tr -d '\n' < "$output_dir/matrix.json")" \
+            >> "$GITHUB_OUTPUT"
           if [ -s "$output_dir/packages.txt" ]; then
             echo 'has_builds=true' >> "$GITHUB_OUTPUT"
+            {
+              echo '### Selected package builds'
+              sed 's/^/- /' "$output_dir/packages.txt"
+            } >> "$GITHUB_STEP_SUMMARY"
           else
             echo 'has_builds=false' >> "$GITHUB_OUTPUT"
-          fi
-          if [ -s "$output_dir/recipe.patch" ]; then
-            echo 'has_recipe_changes=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'has_recipe_changes=false' >> "$GITHUB_OUTPUT"
+            echo 'No package build is required.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload prepared metadata
+  policy:
+    needs: select
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: archlinux:base
+
+    steps:
+      - name: Install the Bash parser and test tools
+        run: pacman -Syu --noconfirm --needed git python shfmt
+
+      - name: Check out the same source candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.select.outputs.snapshot_sha }}
+          persist-credentials: false
+
+      - name: Validate every update contract and comparator test
+        run: |
+          python3 ci/recipe-ir.py validate
+          python3 -m unittest discover -s tests -v
+          bash -n build.sh aur-watch.sh ci/*.sh
+
+  prepare-policy:
+    needs: select
+    if: needs.select.outputs.has_builds == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      - name: Install metadata preparation tools
+        run: pacman -Syu --noconfirm --needed git
+
+      - name: Check out the same source candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.select.outputs.snapshot_sha }}
+          persist-credentials: false
+
+      - name: Derive this package's artifact policy as an unprivileged user
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          useradd -m policyuser
+          install -d -o policyuser -g policyuser -m0755 /policy
+          runuser -u policyuser -- env HOME=/home/policyuser \
+            ./ci/prepare-package.sh "$PACKAGE" /policy
+          chown -R root:root /policy
+          chmod -R a-w /policy
+
+      - name: Upload policy independently from every build job
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: prepared-changes
-          path: ${{ runner.temp }}/prepared
+          name: policy-${{ matrix.package }}
+          path: /policy
           if-no-files-found: error
           retention-days: 1
 
   build:
-    needs: prepare
-    if: needs.prepare.outputs.has_builds == 'true'
+    needs: [select, policy, prepare-policy]
+    if: >-
+      ${{ always() && needs.select.outputs.has_builds == 'true' &&
+          needs.policy.result == 'success' &&
+          (needs.prepare-policy.result == 'success' ||
+           needs.prepare-policy.result == 'failure') }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     container:
@@ -120,52 +190,61 @@ jobs:
           pacman -Syu --noconfirm --needed \
             git gnupg openssh python sudo
 
-      - name: Check out the prepared source snapshot
+      - name: Check out the same source candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.prepare.outputs.prepared_sha }}
+          ref: ${{ needs.select.outputs.snapshot_sha }}
           persist-credentials: false
 
       - name: Mark the checkout as safe for Git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Download prepared metadata
+      - name: Download the independently prepared artifact policy
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: prepared-changes
-          path: ${{ runner.temp }}/prepared
+          name: policy-${{ matrix.package }}
+          path: /policy
 
-      - name: Apply prepared recipe changes
-        run: ./ci/apply-prepared-changes.sh "$RUNNER_TEMP/prepared/recipe.patch"
-
-      - name: Create the unprivileged build user
+      - name: Build this package as an unprivileged user
+        env:
+          PACKAGE: ${{ matrix.package }}
         run: |
           useradd -m builduser
           echo 'builduser ALL=(root) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builduser
           install -d -o builduser -g builduser -m0755 /artifacts
           install -o builduser -g builduser -m0644 \
-            "$RUNNER_TEMP/prepared/packages.txt" /home/builduser/packages.txt
+            /policy/packages.txt /home/builduser/packages.txt
           install -o builduser -g builduser -m0644 \
-            "$RUNNER_TEMP/prepared/expected-packages.tsv" /home/builduser/expected-packages.tsv
+            /policy/expected-packages.tsv \
+            /home/builduser/expected-packages.tsv
           chown -R builduser:builduser "$GITHUB_WORKSPACE"
-
-      - name: Build unsigned packages without publishing credentials
-        run: |
           runuser -u builduser -- env HOME=/home/builduser \
             ./ci/build-packages.sh /home/builduser/packages.txt \
               /home/builduser/expected-packages.tsv /artifacts
 
-      - name: Upload unsigned packages
+      - name: Assemble the successful matrix artifact
+        run: |
+          install -d -m0755 "$RUNNER_TEMP/built/packages"
+          find /artifacts -mindepth 1 -maxdepth 1 -type f \
+            -exec install -m0644 -t "$RUNNER_TEMP/built/packages" -- {} +
+
+      - name: Upload this successful package build
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: unsigned-packages
-          path: /artifacts
+          name: built-${{ matrix.package }}
+          path: ${{ runner.temp }}/built
           if-no-files-found: error
           retention-days: 1
 
   publish:
-    needs: [prepare, build]
-    if: needs.prepare.outputs.has_builds == 'true' && needs.build.result == 'success'
+    needs: [select, policy, prepare-policy, build]
+    if: >-
+      ${{ always() && github.event_name != 'pull_request' &&
+          (github.event_name == 'push' ||
+           (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) &&
+          needs.select.outputs.has_builds == 'true' &&
+          needs.policy.result == 'success' &&
+          (needs.build.result == 'success' || needs.build.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -173,34 +252,34 @@ jobs:
 
     steps:
       - name: Install publishing tools
-        run: |
-          pacman -Syu --noconfirm --needed \
-            git gnupg rclone
+        run: pacman -Syu --noconfirm --needed git gnupg rclone
 
-      - name: Check out the prepared source snapshot
+      - name: Check out the built source snapshot
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.prepare.outputs.prepared_sha }}
+          ref: ${{ needs.select.outputs.snapshot_sha }}
           persist-credentials: false
 
-      - name: Download unsigned packages
+      - name: Download every successful matrix artifact
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: unsigned-packages
-          path: /packages
+          pattern: built-*
+          path: ${{ runner.temp }}/downloads
 
-      - name: Download prepared artifact policy
+      - name: Download policies from the separate metadata jobs
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: prepared-changes
-          path: ${{ runner.temp }}/prepared
+          pattern: policy-*
+          path: ${{ runner.temp }}/policies
 
-      - name: Verify package artifact before exposing secrets
+      - name: Validate and combine successes before exposing secrets
         run: |
-          ./ci/publish.sh --verify-only /packages \
-            "$RUNNER_TEMP/prepared/expected-packages.tsv"
+          ./ci/collect-built-packages.sh \
+            "$RUNNER_TEMP/downloads" "$RUNNER_TEMP/policies" /packages \
+            "$RUNNER_TEMP/expected-packages.tsv" \
+            "$RUNNER_TEMP/published-versions.tsv"
 
-      - name: Sign and publish to R2
+      - name: Sign and publish successful packages to R2
         env:
           GNUPGHOME: /publisher-gnupg
           GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
@@ -214,35 +293,52 @@ jobs:
           REPO_NAME: nekolsd
         run: |
           ./ci/publish.sh /packages \
-            "$RUNNER_TEMP/prepared/expected-packages.tsv" /repo
+            "$RUNNER_TEMP/expected-packages.tsv" /repo
 
-  commit:
-    needs: [prepare, publish]
-    if: needs.prepare.outputs.has_recipe_changes == 'true' && needs.publish.result == 'success'
+      - name: Upload the exact successful-publication state
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: published-state
+          path: ${{ runner.temp }}/published-versions.tsv
+          if-no-files-found: error
+          retention-days: 1
+
+  record:
+    needs: publish
+    if: needs.publish.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: write
 
     steps:
-      - name: Check out the latest branch head
+      - name: Check out the latest main without executing package content
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
           fetch-depth: 0
 
-      - name: Download prepared metadata
+      - name: Download the successful-publication state
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: prepared-changes
-          path: ${{ runner.temp }}/prepared
+          name: published-state
+          path: ${{ runner.temp }}/published-state
 
-      - name: Validate and apply the prepared recipe patch
-        run: ./ci/apply-prepared-changes.sh "$RUNNER_TEMP/prepared/recipe.patch"
-
-      - name: Commit the published vendor versions
+      - name: Advance only versions that reached R2
         run: |
+          python3 ci/advance-published.py nvchecker-old.json \
+            "$RUNNER_TEMP/published-state/published-versions.tsv"
+          if git diff --quiet -- nvchecker-old.json; then
+            echo 'Publication state was already current.'
+            exit 0
+          fi
+          if [ "$(git diff --name-only --)" != nvchecker-old.json ]; then
+            echo 'Refusing to commit an unexpected path.' >&2
+            exit 1
+          fi
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git commit -m 'CI: advance published vendor versions [skip ci]'
+          git add nvchecker-old.json
+          git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit \
+            -m 'CI: advance successful publication state [skip ci]'
           git push origin HEAD:main

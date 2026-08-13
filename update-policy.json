@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "packages": {
+    "1password": {
+      "version_fields": ["_tarver"],
+      "release_fields": ["_tarver", "pkgrel"],
+      "remote_checksums": {
+        "sha256sums": [0]
+      },
+      "automerge": false
+    },
+    "64gram-desktop-bin": {
+      "version_fields": ["pkgver"],
+      "release_fields": ["pkgver", "pkgrel"],
+      "remote_checksums": {
+        "sha256sums": [8]
+      },
+      "automerge": false
+    },
+    "claude-code": {
+      "version_fields": ["pkgver"],
+      "release_fields": ["pkgver", "pkgrel"],
+      "remote_checksums": {
+        "sha256sums_x86_64": [0],
+        "sha256sums_aarch64": [0]
+      },
+      "automerge": false
+    },
+    "google-chrome": {
+      "version_fields": ["pkgver"],
+      "release_fields": ["pkgver", "pkgrel"],
+      "remote_checksums": {
+        "sha512sums_x86_64": [0],
+        "sha512sums_aarch64": [0]
+      },
+      "automerge": false
+    },
+    "helium-browser-bin": {
+      "version_fields": ["pkgver"],
+      "release_fields": ["pkgver", "pkgrel"],
+      "remote_checksums": {
+        "sha256sums": [2],
+        "sha256sums_x86_64": [0],
+        "sha256sums_aarch64": [0]
+      },
+      "automerge": false
+    },
+    "pac-pacman-aliases": {
+      "version_fields": ["pkgver"],
+      "release_fields": ["pkgver", "pkgrel"],
+      "remote_checksums": {
+        "sha256sums": [0]
+      },
+      "automerge": false
+    },
+    "protonplus": {
+      "version_fields": ["pkgver"],
+      "release_fields": ["pkgver", "pkgrel"],
+      "remote_checksums": {
+        "sha256sums": [0]
+      },
+      "automerge": false
+    },
+    "speedtest-go": {
+      "version_fields": ["pkgver"],
+      "release_fields": ["pkgver", "pkgrel"],
+      "remote_checksums": {
+        "sha256sums": [0]
+      },
+      "automerge": false
+    },
+    "vicinae-bin": {
+      "version_fields": ["pkgver"],
+      "release_fields": ["pkgver", "pkgrel"],
+      "remote_checksums": {
+        "sha256sums": [0]
+      },
+      "automerge": false
+    },
+    "visual-studio-code-bin": {
+      "version_fields": ["pkgver"],
+      "release_fields": ["pkgver", "pkgrel"],
+      "remote_checksums": {
+        "sha256sums_x86_64": [0],
+        "sha256sums_aarch64": [0],
+        "sha256sums_armv7h": [0]
+      },
+      "automerge": false
+    },
+    "wemeet-bin": {
+      "version_fields": ["pkgver", "_pkgver_arm"],
+      "release_fields": [
+        "pkgver",
+        "_pkgver_arm",
+        "_x86_md5",
+        "_arm_md5",
+        "pkgrel"
+      ],
+      "remote_checksums": {
+        "sha512sums_x86_64": [0],
+        "sha512sums_aarch64": [0]
+      },
+      "automerge": false
+    }
+  }
+}

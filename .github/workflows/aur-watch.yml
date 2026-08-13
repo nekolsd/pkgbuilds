@@ -5,7 +5,8 @@ name: Review every AUR source change
 # build, and no AUR object is ever checked out or executed.
 on:
   schedule:
-    - cron: '0 18 * * *'
+    # 10:00 UTC = 18:00 Asia/Singapore, eight hours before the vendor build.
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 permissions:
@@ -25,7 +26,7 @@ jobs:
 
     steps:
       - name: Install the read-only tooling
-        run: pacman -Syu --noconfirm --needed git github-cli
+        run: pacman -Syu --noconfirm --needed git github-cli python shfmt
 
       - name: Check out the local recipes
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -56,7 +57,7 @@ jobs:
           if [ -s /tmp/aur-changes.tsv ]; then
             echo 'changed=true' >> "$GITHUB_OUTPUT"
             {
-              echo '### AUR changes awaiting review'
+              echo '### AUR changes detected for parsed classification'
               cut -f1 /tmp/aur-changes.tsv | sed 's/^/- /'
             } >> "$GITHUB_STEP_SUMMARY"
           else
@@ -73,18 +74,41 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Render reports without write credentials
+      - name: Classify parsed changes and render exceptional reports
         if: steps.scan.outputs.changed == 'true'
         id: reports
         shell: bash
         run: |
+          : > /tmp/aur-safe.tsv
           : > /tmp/aur-reviewable.tsv
           while IFS=$'\t' read -r pkg old_commit new_commit; do
+            if ! result=$(./aur-watch.sh classify \
+                "$pkg" "$old_commit" "$new_commit"); then
+              result=$'unknown\tfalse\tclassification command failed'
+            fi
+            IFS=$'\t' read -r classification safe reason <<< "$result"
+
+            if [ "$safe" = true ]; then
+              printf '%s\t%s\t%s\t%s\n' \
+                "$pkg" "$old_commit" "$new_commit" "$classification" \
+                >> /tmp/aur-safe.tsv
+              printf -- '- `%s`: %s (%s)\n' "$pkg" "$classification" "$reason" \
+                >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
             body="/tmp/aur-$pkg.md"
             if ./aur-watch.sh report \
                 "$pkg" "$old_commit" "$new_commit" > "$body"; then
-              printf '%s\t%s\t%s\n' \
-                "$pkg" "$old_commit" "$new_commit" >> /tmp/aur-reviewable.tsv
+              {
+                printf '> Parsed classification: **%s** — %s\n\n' \
+                  "$classification" "$reason"
+                cat "$body"
+              } > "$body.with-classification"
+              mv "$body.with-classification" "$body"
+              printf '%s\t%s\t%s\t%s\n' \
+                "$pkg" "$old_commit" "$new_commit" "$classification" \
+                >> /tmp/aur-reviewable.tsv
             else
               rm -f "$body"
               echo "::warning title=AUR changed during review::$pkg will be retried next run"
@@ -96,6 +120,53 @@ jobs:
           else
             echo 'ready=false' >> "$GITHUB_OUTPUT"
           fi
+          if [ -s /tmp/aur-safe.tsv ]; then
+            echo 'safe=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'safe=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record release-only AUR positions without review PRs
+        if: steps.reports.outputs.safe == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh auth setup-git --hostname github.com --force
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          git fetch origin main
+          git checkout -B aur-watch-safe-baselines origin/main
+          while IFS=$'\t' read -r pkg old_commit new_commit classification; do
+            ./aur-watch.sh set-seen "$pkg" "$new_commit"
+          done < /tmp/aur-safe.tsv
+
+          if ! git diff --quiet -- aur-seen.lock; then
+            git add aur-seen.lock
+            git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit \
+              -m 'AUR: record release-only source updates [skip ci]'
+            git push origin HEAD:main
+          fi
+
+          # Retire lock-only PRs created by the previous all-changes workflow.
+          # A PR containing any hand-ported recipe work is deliberately preserved.
+          while IFS=$'\t' read -r pkg old_commit new_commit classification; do
+            branch="aur-watch/$pkg"
+            pr_number=$(gh pr list \
+              --repo "$GITHUB_REPOSITORY" --head "$branch" --state open \
+              --json number --jq '.[0].number // empty')
+            [ -n "$pr_number" ] || continue
+            if ! changed_paths=$(gh pr diff "$pr_number" \
+                --repo "$GITHUB_REPOSITORY" --name-only); then
+              echo "::warning title=Could not inspect old AUR PR::$pkg PR #$pr_number was preserved"
+              continue
+            fi
+            if [ -z "$changed_paths" ] || [ "$changed_paths" = aur-seen.lock ]; then
+              gh pr close "$pr_number" --repo "$GITHUB_REPOSITORY" \
+                --comment "The parsed AUR change is ${classification}; its baseline was recorded automatically without adopting AUR package content."
+            fi
+          done < /tmp/aur-safe.tsv
 
       - name: Open or update one review PR per package
         if: steps.reports.outputs.ready == 'true'
@@ -109,7 +180,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
 
-          while IFS=$'\t' read -r pkg old_commit new_commit; do
+          while IFS=$'\t' read -r pkg old_commit new_commit classification; do
             branch="aur-watch/$pkg"
             body="/tmp/aur-$pkg.md"
 

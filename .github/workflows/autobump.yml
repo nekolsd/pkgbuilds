@@ -1,0 +1,305 @@
+name: Check official vendor updates
+
+on:
+  schedule:
+    # 18:00 UTC = 02:00 Asia/Singapore the next day.
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Optional space-separated vendor packages to check'
+        required: false
+        type: string
+
+# No package or downloaded source is executed in this workflow. Write access is
+# used only after checksum preparation and parsed-IR validation have completed.
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: vendor-autobump
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: archlinux:base
+    outputs:
+      has_bumps: ${{ steps.results.outputs.has_bumps }}
+      matrix: ${{ steps.results.outputs.matrix }}
+      has_pending: ${{ steps.results.outputs.has_pending }}
+      pending: ${{ steps.results.outputs.pending }}
+
+    steps:
+      - name: Install official-version tooling
+        run: pacman -Syu --noconfirm --needed git nvchecker python
+
+      - name: Check out main without storing write credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Query configured vendor endpoints
+        id: results
+        env:
+          FILTER_PACKAGES: ${{ inputs.packages }}
+        run: |
+          useradd -m detector
+          chown -R detector:detector "$GITHUB_WORKSPACE"
+          install -d -o detector -g detector -m0755 "$RUNNER_TEMP/vendor"
+          runuser -u detector -- env HOME=/home/detector \
+            ./ci/detect-vendor-updates.sh "$RUNNER_TEMP/vendor" "$FILTER_PACKAGES"
+
+          printf 'matrix=%s\n' \
+            "$(tr -d '\n' < "$RUNNER_TEMP/vendor/matrix.json")" \
+            >> "$GITHUB_OUTPUT"
+          if [ -s "$RUNNER_TEMP/vendor/bumps.tsv" ]; then
+            echo 'has_bumps=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'has_bumps=false' >> "$GITHUB_OUTPUT"
+          fi
+          if [ -s "$RUNNER_TEMP/vendor/pending.txt" ]; then
+            echo 'has_pending=true' >> "$GITHUB_OUTPUT"
+            printf 'pending=%s\n' \
+              "$(paste -sd' ' "$RUNNER_TEMP/vendor/pending.txt")" \
+              >> "$GITHUB_OUTPUT"
+          else
+            echo 'has_pending=false' >> "$GITHUB_OUTPUT"
+            echo 'pending=' >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo '### Official vendor check'
+            if [ -s "$RUNNER_TEMP/vendor/bumps.tsv" ]; then
+              echo
+              echo 'New autobump candidates:'
+              awk -F '\t' '{printf "- `%s`: %s → %s\n", $1, $2, $3}' \
+                "$RUNNER_TEMP/vendor/bumps.tsv"
+            else
+              echo
+              echo 'No new recipe bump is required.'
+            fi
+            if [ -s "$RUNNER_TEMP/vendor/pending.txt" ]; then
+              echo
+              echo 'Merged versions awaiting a publication retry:'
+              sed 's/^/- /' "$RUNNER_TEMP/vendor/pending.txt"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  autobump:
+    needs: detect
+    if: needs.detect.outputs.has_bumps == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      - name: Install checksum, parser, and PR tooling
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git github-cli pacman-contrib python shfmt
+
+      - name: Check out the latest local recipe without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mark the checkout as safe for Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Prepare checksums and enforce the parsed update contract
+        env:
+          PACKAGE: ${{ matrix.package }}
+          VENDOR_VERSION: ${{ matrix.vendor_version }}
+        run: |
+          useradd -m bumpuser
+          chown -R bumpuser:bumpuser "$GITHUB_WORKSPACE"
+          install -d -o bumpuser -g bumpuser -m0755 "$RUNNER_TEMP/autobump"
+          runuser -u bumpuser -- env HOME=/home/bumpuser \
+            ./ci/prepare-autobump.sh \
+              "$PACKAGE" "$VENDOR_VERSION" "$RUNNER_TEMP/autobump"
+
+      - name: Render the review body before enabling GitHub credentials
+        env:
+          PACKAGE: ${{ matrix.package }}
+          LOCAL_VERSION: ${{ matrix.local_version }}
+          VENDOR_VERSION: ${{ matrix.vendor_version }}
+        shell: bash
+        run: |
+          reason=$(python3 - "$RUNNER_TEMP/autobump/classification.json" <<'PY'
+          import json
+          import os
+          with open(os.environ["RUNNER_TEMP"] + "/autobump/classification.json", encoding="utf-8") as stream:
+              print(json.load(stream)["reason"])
+          PY
+          )
+          classification=$(python3 - "$RUNNER_TEMP/autobump/classification.json" <<'PY'
+          import json
+          import os
+          with open(os.environ["RUNNER_TEMP"] + "/autobump/classification.json", encoding="utf-8") as stream:
+              print(json.load(stream)["classification"])
+          PY
+          )
+          body="$RUNNER_TEMP/autobump/pr.md"
+          {
+            printf '## Official vendor update: `%s`\n\n' "$PACKAGE"
+            printf -- '- Local version: `%s`\n' "$LOCAL_VERSION"
+            printf -- '- Vendor version: `%s`\n' "$VENDOR_VERSION"
+            printf -- '- Parsed update contract: `%s` — %s\n' "$classification" "$reason"
+            echo '- Checksums were recalculated from the official URLs declared by the local PKGBUILD.'
+            echo '- AUR did not supply the version, source URL, or checksum.'
+            echo
+            echo '### Candidate diff summary'
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/autobump/diffstat.txt"
+            echo '```'
+            echo
+            echo 'A clean, credential-free package build runs on this PR. Automatic merge is'
+            echo 'disabled initially; merge only after the check passes and no packaging review is pending.'
+          } > "$body"
+
+      - name: Open or update this package's autobump PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE: ${{ matrix.package }}
+          VENDOR_VERSION: ${{ matrix.vendor_version }}
+        shell: bash
+        run: |
+          gh auth setup-git --hostname github.com --force
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          branch="autobump/$PACKAGE"
+          body="$RUNNER_TEMP/autobump/pr.md"
+
+          contract=$(python3 - "$RUNNER_TEMP/autobump/classification.json" <<'PY'
+          import json
+          import os
+          with open(os.environ["RUNNER_TEMP"] + "/autobump/classification.json", encoding="utf-8") as stream:
+              print(json.load(stream)["classification"])
+          PY
+          )
+          if [ "$contract" = release-only ]; then
+            gated=false
+          else
+            gated=true
+            {
+              echo
+              echo "> The parsed update contract returned **$contract**."
+              echo '> Keep this PR Draft and inspect every non-release IR change before merging.'
+            } >> "$body"
+          fi
+
+          aur_url=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+            --head "aur-watch/$PACKAGE" --state open \
+            --json url --jq '.[0].url // empty')
+          if [ -n "$aur_url" ]; then
+            {
+              echo
+              echo "> A parsed AUR packaging review is still open: $aur_url"
+              echo '> This autobump remains Draft until that package-specific review is resolved.'
+            } >> "$body"
+            gated=true
+          fi
+
+          pr_number=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+            --head "$branch" --state open \
+            --json number --jq '.[0].number // empty')
+          if git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch" \
+              2>/dev/null; then
+            mapfile -d '' -t branch_paths < <(
+              git diff --name-only -z origin/main "origin/$branch" --)
+            if [ ${#branch_paths[@]} -eq 0 ]; then
+              branch_is_bot_owned=true
+            elif [ ${#branch_paths[@]} -eq 1 ] \
+                && [ "${branch_paths[0]}" = "$PACKAGE/PKGBUILD" ]; then
+              git show "origin/$branch:$PACKAGE/PKGBUILD" \
+                > "$RUNNER_TEMP/autobump/existing.PKGBUILD"
+              existing_contract=$(python3 ci/recipe-ir.py compare "$PACKAGE" \
+                "$RUNNER_TEMP/autobump/old.PKGBUILD" \
+                "$RUNNER_TEMP/autobump/existing.PKGBUILD" --format json \
+                | python3 -c 'import json,sys; print(json.load(sys.stdin)["classification"])')
+              if [ "$existing_contract" = release-only ]; then
+                branch_is_bot_owned=true
+              else
+                branch_is_bot_owned=false
+              fi
+            else
+              branch_is_bot_owned=false
+            fi
+
+            if [ "$branch_is_bot_owned" = false ]; then
+              if [ -n "$pr_number" ]; then
+                gh pr comment "$pr_number" --repo "$GITHUB_REPOSITORY" \
+                  --body 'The bot preserved this branch because it now contains changes outside the release-only update contract. Reconcile the newer vendor version manually.'
+              fi
+              echo "Refusing to overwrite human or structural changes on $branch" >&2
+              exit 1
+            fi
+
+            if [ -f "$RUNNER_TEMP/autobump/existing.PKGBUILD" ] \
+                && cmp -s "$RUNNER_TEMP/autobump/existing.PKGBUILD" \
+                  "$PACKAGE/PKGBUILD"; then
+              push_candidate=false
+            else
+              push_candidate=true
+            fi
+          else
+            push_candidate=true
+          fi
+
+          if [ "$push_candidate" = true ]; then
+            git checkout -b "$branch"
+            git add "$PACKAGE/PKGBUILD"
+            git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit \
+              -m "$PACKAGE: update to $VENDOR_VERSION"
+            git push --force-with-lease origin "HEAD:refs/heads/$branch"
+          else
+            echo "Existing $branch already contains this exact vendor candidate."
+          fi
+
+          title="$PACKAGE: update to $VENDOR_VERSION"
+          if [ -z "$pr_number" ]; then
+            create_args=(--repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
+              --title "$title" --body-file "$body")
+            [ "$gated" = false ] || create_args+=(--draft)
+            gh pr create "${create_args[@]}"
+          else
+            gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" \
+              --title "$title" --body-file "$body"
+            if [ "$gated" = true ]; then
+              gh pr ready "$pr_number" --repo "$GITHUB_REPOSITORY" --undo || true
+            fi
+          fi
+
+          # GITHUB_TOKEN-authored pushes/PRs do not recursively emit normal
+          # push or pull_request workflows. workflow_dispatch is the supported
+          # exception, so explicitly build the exact candidate branch. build.yml
+          # permits publishing only from refs/heads/main.
+          if [ "$push_candidate" = true ] || [ -z "$pr_number" ]; then
+            gh workflow run build.yml --repo "$GITHUB_REPOSITORY" \
+              --ref "$branch" -f packages="$PACKAGE"
+          fi
+
+  retry-published:
+    needs: detect
+    if: needs.detect.outputs.has_pending == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Retry versions merged but not yet recorded as published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGES: ${{ needs.detect.outputs.pending }}
+        run: gh workflow run build.yml --ref main -f packages="$PACKAGES"

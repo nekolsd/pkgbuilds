@@ -29,9 +29,22 @@ sudo pacman-key --lsign-key CEFA64B7B1308F2ECB404D423D02D08ED532F9C7
 
 ## Maintenance
 
-`build.sh` handles vendor-driven version checks and builds; run it with no arguments
-for the full list of subcommands. This path does not depend on AUR, so an AUR outage
-or push freeze cannot stop package updates.
+Official vendor endpoints and the local recipes have separate responsibilities:
+
+- At **02:00 Asia/Singapore**, `autobump.yml` asks nvchecker only for official
+  vendor versions. Each outdated package gets its own `autobump/<package>` PR.
+- The updater changes the configured version field, resets `pkgrel`, downloads the
+  local recipe's official sources, and recalculates checksums. `shfmt` parses the
+  old and new PKGBUILDs; `update-policy.json` declares exactly which release fields
+  and remote checksum slots may differ.
+- Every candidate is built without repository, signing, or R2 credentials. The PR
+  is merged manually at first; `automerge` is deliberately disabled per package.
+- A merge builds only the affected package. Builds run as an independent matrix,
+  so one failure does not prevent successful packages from being signed and
+  published. `nvchecker-old.json` advances only after R2 publication succeeds.
+
+`build.sh` remains the local build utility; run it with no arguments for its
+subcommands. AUR is never part of official version discovery or checksum creation.
 
 ### Importing a new AUR package
 
@@ -48,18 +61,25 @@ source to `nvchecker.toml`, seed the same version in `nvchecker-old.json`, and m
 the accepted commit signed. If no vendor endpoint is available, document the
 manual update plan instead of silently making AUR the update source.
 
-`aur-watch.sh` is a separate, read-only observer. `aur-seen.lock` records the last
-reviewed AUR commit for each package, and any later commit opens a Draft PR with the
-complete tree-level change list (file modes and blob IDs) plus a text diff. The
-watcher never checks out or materializes candidate files in the package tree; it
-reads them only as objects in a temporary bare Git repository and never sources,
-builds, or executes them.
-Merging one of those PRs acknowledges the new AUR position even when no local change
-is adopted; useful recipe changes must be ported to the local package explicitly.
-Any reviewed file change inside a package directory then rebuilds that package after
-it reaches `main`; when the upstream version is unchanged, increment `pkgrel` so
-clients see the replacement as an upgrade. Closing a PR without merging deliberately
-keeps the old position, so the watcher will continue to report that unacknowledged
-commit.
+At **18:00 Asia/Singapore**, `aur-watch.sh` is a separate, read-only observer.
+`aur-seen.lock` records the previous AUR commit. The watcher compares that AUR tree
+with the new AUR tree -- not the permanently customized local recipe -- and never
+checks out, sources, builds, or executes AUR content.
+
+The same parsed-IR policy removes comments/positions and masks only configured
+release values. `source` templates, checksum-array shape, local patch checksum
+slots, dependencies, functions, auxiliary files, symlinks, and modes remain part of
+the comparison:
+
+- A release-only or semantic-no-op change advances `aur-seen.lock` automatically
+  and appears only in the Actions summary.
+- A packaging change or an unparseable/unsupported construct opens one Draft Review
+  PR for that package with the complete tree-level object list and text diff.
+- A matching AUR Review PR keeps an official autobump PR in Draft. Port any useful
+  packaging change by hand, rebuild, then merge the review baseline. AUR versions
+  never upgrade or downgrade the local recipe automatically.
+
+When packaging changes without `pkgver` changing, increment `pkgrel` so clients see
+the rebuilt package as an upgrade.
 
 `SETUP-CI.md` documents the CI and R2 setup.
