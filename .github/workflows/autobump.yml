@@ -212,10 +212,23 @@ jobs:
             } >> "$body"
             gated=true
           fi
+          if [ "$gated" = true ]; then
+            echo '<!-- autobump-gated -->' >> "$body"
+          fi
 
           pr_number=$(gh pr list --repo "$GITHUB_REPOSITORY" \
             --head "$branch" --state open \
             --json number --jq '.[0].number // empty')
+          was_bot_gated=false
+          if [ -n "$pr_number" ]; then
+            current_body=$(gh pr view "$pr_number" --repo "$GITHUB_REPOSITORY" \
+              --json body --jq .body)
+            if grep -Fq '<!-- autobump-gated -->' <<< "$current_body" \
+                || grep -Fq 'This autobump remains Draft until' <<< "$current_body" \
+                || grep -Fq 'Keep this PR Draft' <<< "$current_body"; then
+              was_bot_gated=true
+            fi
+          fi
           if git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch" \
               2>/dev/null; then
             branch_base=$(git merge-base origin/main "origin/$branch")
@@ -282,6 +295,8 @@ jobs:
               --title "$title" --body-file "$body"
             if [ "$gated" = true ]; then
               gh pr ready "$pr_number" --repo "$GITHUB_REPOSITORY" --undo || true
+            elif [ "$was_bot_gated" = true ]; then
+              gh pr ready "$pr_number" --repo "$GITHUB_REPOSITORY"
             fi
           fi
 

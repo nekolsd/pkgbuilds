@@ -186,6 +186,7 @@ jobs:
             body="/tmp/aur-$pkg.md"
             branch_advanced=false
             candidate_changed=false
+            force_update=false
 
             pr_number=$(gh pr list \
               --repo "$GITHUB_REPOSITORY" \
@@ -195,14 +196,28 @@ jobs:
             if [ -n "$pr_number" ]; then
               git fetch origin \
                 "refs/heads/$branch:refs/remotes/origin/$branch"
-              git checkout -B "$branch" "origin/$branch"
-              if ! git merge-base --is-ancestor origin/main HEAD; then
-                if git -c commit.gpgsign=false merge --no-edit origin/main; then
-                  branch_advanced=true
-                else
-                  git merge --abort || true
-                  echo "::warning title=AUR review branch conflict::$pkg was preserved for manual reconciliation"
-                  continue
+              branch_base=$(git merge-base origin/main "origin/$branch")
+              mapfile -d '' -t branch_paths < <(
+                git diff --name-only -z "$branch_base" "origin/$branch" --)
+              if [ ${#branch_paths[@]} -eq 1 ] \
+                  && [ "${branch_paths[0]}" = aur-seen.lock ] \
+                  && ! git merge-base --is-ancestor origin/main "origin/$branch"; then
+                # A lock-only branch is created and owned by this workflow. Replay
+                # its package baseline on current main instead of text-merging a
+                # compact lock file, whose adjacent lines can conflict spuriously.
+                git checkout -B "$branch" origin/main
+                branch_advanced=true
+                force_update=true
+              else
+                git checkout -B "$branch" "origin/$branch"
+                if ! git merge-base --is-ancestor origin/main HEAD; then
+                  if git -c commit.gpgsign=false merge --no-edit origin/main; then
+                    branch_advanced=true
+                  else
+                    git merge --abort || true
+                    echo "::warning title=AUR review branch conflict::$pkg was preserved for manual reconciliation"
+                    continue
+                  fi
                 fi
               fi
               new_pr=false
@@ -240,7 +255,11 @@ jobs:
                 --title "$pkg: review AUR commit ${new_commit:0:12}" \
                 --body-file "$body"
             else
-              git push origin "HEAD:refs/heads/$branch"
+              if [ "$force_update" = true ]; then
+                git push --force-with-lease origin "HEAD:refs/heads/$branch"
+              else
+                git push origin "HEAD:refs/heads/$branch"
+              fi
               if [ "$candidate_changed" = true ]; then
                 gh pr edit "$pr_number" \
                   --repo "$GITHUB_REPOSITORY" \
