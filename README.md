@@ -24,8 +24,11 @@ sudo pacman-key --lsign-key CEFA64B7B1308F2ECB404D423D02D08ED532F9C7
 ## Packages
 
 `1password` · `64gram-desktop-bin` · `claude-code` · `google-chrome` ·
-`helium-browser-bin` · `pac-pacman-aliases` · `protonplus` · `speedtest-go` ·
-`vicinae-bin` · `visual-studio-code-bin` · `wemeet-bin`
+`helium-browser-bin` · `openai-codex-bin` · `pac-pacman-aliases` · `protonplus` ·
+`speedtest-go` · `vicinae-bin` · `visual-studio-code-bin` · `wemeet-bin`
+
+`openai-codex-bin` follows OpenAI's stable release channel directly. It provides
+and conflicts with Extra's `openai-codex`, so installing it replaces that package.
 
 ## Maintenance
 
