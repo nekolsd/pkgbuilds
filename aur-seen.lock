@@ -2,7 +2,7 @@
 # a review PR; this file never controls vendor version discovery or builds.
 1password	8a18b7b9c8ddbb05c2905cb53c2bad53083bb199
 64gram-desktop-bin	5ec268cc1f3bb8ffd01e3d0946c0a2894700ebbc
-claude-code	4d00ea2e427ec3e4690796912b167efeb2456d7f
+claude-code	7c3ef4648d591f88e10bb3ce7e5286a7d805741a
 google-chrome	041d1e50029c86fa356e5eae19072c151fb50574
 helium-browser-bin	108cb9ad9251ed783070620165efae38bd8765e2
 pac-pacman-aliases	3edd69234dd4153098551883163850720a3c1a20
