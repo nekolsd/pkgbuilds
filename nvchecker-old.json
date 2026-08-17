@@ -16,7 +16,7 @@
       "version": "151.0.7922.137"
     },
     "helium-browser-bin": {
-      "version": "0.15.4.1",
+      "version": "0.15.5.1",
       "gitref": "refs/tags/0.15.4.1",
       "url": "https://github.com/imputnet/helium-linux/releases/tag/0.15.4.1"
     },
@@ -35,7 +35,7 @@
       "url": "https://github.com/showwin/speedtest-go/releases/tag/v1.7.11"
     },
     "vicinae-bin": {
-      "version": "0.25.0",
+      "version": "0.26.2",
       "gitref": "refs/tags/v0.25.0",
       "url": "https://github.com/vicinaehq/vicinae/releases/tag/v0.25.0"
     },
