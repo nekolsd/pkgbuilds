@@ -2,13 +2,13 @@
 # a review PR; this file never controls vendor version discovery or builds.
 1password	8a18b7b9c8ddbb05c2905cb53c2bad53083bb199
 64gram-desktop-bin	5ec268cc1f3bb8ffd01e3d0946c0a2894700ebbc
-claude-code	7c3ef4648d591f88e10bb3ce7e5286a7d805741a
+claude-code	ef0109d4e97e6a156c3e5fdb86d174e2b9daf4a2
 google-chrome	041d1e50029c86fa356e5eae19072c151fb50574
 helium-browser-bin	c009dd158a99a2dc0b0768605942b9e00ecec67b
 pac-pacman-aliases	3edd69234dd4153098551883163850720a3c1a20
 protonplus	ded2c360d37b8b0ef59cc4f4a66db780859079b2
 speedtest-go	ea2bcb414113ca84ff481e6ff45202ed6422f3d5
-vicinae-bin	b7b43047572cfff8b728b57b0ec8fb82c0edb752
+vicinae-bin	154ff8d42b27330e1bd8a9196a850ef5c09fe02f
 visual-studio-code-bin	204b2f0626ca1e810c5e496872b12f049340c25c
 wemeet-bin	ce20a7f39532d2c832c942102145680599143deb
 openai-codex-bin	64f60e2276e88adb066b48a18b663455e5f9024d
