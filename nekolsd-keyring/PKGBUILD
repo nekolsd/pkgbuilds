@@ -1,0 +1,25 @@
+pkgname=(nekolsd-keyring)
+pkgver=20260819
+pkgrel=1
+pkgdesc='nekolsd PGP keyring'
+arch=('any')
+url='https://github.com/nekolsd/pkgbuilds'
+install="$pkgname.install"
+depends=('pacman')
+source=(
+    'nekolsd.gpg'
+    'nekolsd-trusted'
+    'nekolsd-keyring.install'
+)
+b2sums=(
+    'a44d04105c2e89848027c235b47ae143eb3f46cc831fb51591eabd25ee119dfb64f788547f907e511e872bd54436433d61da9f340f319eaedd68684dd1ac848c'
+    '6ba3fcd7aa7cdc22f8670b915a0c9843d77f90c084d915a3ed8b6bd383421ee3510cd125d038953b59d1954eee1e250d3b216cf34235792bedd359679b06b620'
+    '4eb999c6186f11bff38cd0ae12b4071bdd83c6f355234449db43e22a1d4ff05a43edbd4541df7a66dbe855998bdee10313d6e2cf314ab06474593f2ae7451556'
+)
+
+package() {
+	install -dm755 "$pkgdir/usr/share/pacman/keyrings/"
+	install -m0644 nekolsd.gpg "$pkgdir/usr/share/pacman/keyrings/"
+	install -m0644 nekolsd-trusted "$pkgdir/usr/share/pacman/keyrings/"
+	test -f nekolsd-revoked && install -m0644 nekolsd-revoked "$pkgdir/usr/share/pacman/keyrings/" || true
+}
